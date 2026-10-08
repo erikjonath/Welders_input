@@ -616,29 +616,14 @@ def list_page():
             type="primary",
             width="stretch",
         )
-        st.download_button(
-            "📥 최근 3일 CSV",
-            recent_export.to_csv(index=False).encode("utf-8-sig"),
-            file_name=f"welding_last_3_days_{stamp}.csv",
-            mime="text/csv",
-            width="stretch",
-        )
 
-    with st.container(horizontal=True):
-        st.download_button(
-            "📥 전체 데이터 Excel",
-            to_excel(all_export),
-            file_name=f"welding_all_data_{stamp}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            width="stretch",
-        )
-        st.download_button(
-            "📥 전체 데이터 CSV",
-            all_export.to_csv(index=False).encode("utf-8-sig"),
-            file_name=f"welding_all_data_{stamp}.csv",
-            mime="text/csv",
-            width="stretch",
-        )
+    st.download_button(
+        "📥 전체 데이터 Excel",
+        to_excel(all_export),
+        file_name=f"welding_all_data_{stamp}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        width="stretch",
+    )
     st.caption("휴대폰에서는 Excel 파일을 권장합니다. (한글이 깨지지 않음)")
 
 # ---------------------------------------------------------------- app ----
