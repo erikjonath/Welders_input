@@ -11,6 +11,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore as firebase_firestore
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
+from google.cloud.firestore_v1.field_path import FieldPath
 
 KST = ZoneInfo("Asia/Seoul")  # the cloud server runs on UTC; welders work in Korean time
 CACHE_TTL = 15  # seconds a Firestore read is reused (a write from this app clears it at once)
@@ -83,19 +84,22 @@ def clear_cache():
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def latest_by_joint(project: str) -> dict[tuple[str, str, str], dict]:
-    docs = get_db().collection("joints").where(filter=FieldFilter("프로젝트번호", "==", project)).stream()
+    project_field = FieldPath("프로젝트번호").to_api_repr()
+    docs = get_db().collection("joints").where(filter=FieldFilter(project_field, "==", project)).stream()
     return {(d["SPOOL_NO"], d["TAG_NO"], d["JOINT_NO"]): d for d in (x.to_dict() for x in docs)}
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def paused_joints() -> list[dict]:
-    docs = get_db().collection("joints").where(filter=FieldFilter("상태", "==", PAUSED)).stream()
+    status_field = FieldPath("상태").to_api_repr()
+    docs = get_db().collection("joints").where(filter=FieldFilter(status_field, "==", PAUSED)).stream()
     rows = [d.to_dict() for d in docs]
     rows.sort(key=lambda r: (r["일시정지일자"], r["일시정지시간"]), reverse=True)
     return rows
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def _active_all() -> list[dict]:
-    docs = get_db().collection("joints").where(filter=FieldFilter("상태", "==", ACTIVE)).stream()
+    status_field = FieldPath("상태").to_api_repr()
+    docs = get_db().collection("joints").where(filter=FieldFilter(status_field, "==", ACTIVE)).stream()
     rows = [d.to_dict() for d in docs]
     rows.sort(key=lambda r: (r["용접시작일자"], r["용접시작시간"]))
     return rows
