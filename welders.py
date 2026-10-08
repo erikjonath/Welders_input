@@ -88,7 +88,7 @@ def latest_by_joint(project: str) -> dict[tuple[str, str, str], dict]:
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def paused_joints() -> list[dict]:
-    docs = get_db().collection("joints").where(filter=FieldFilter(FieldPath("상태"), "==", "일시정지")).stream()
+    docs = get_db().collection("joints").where(filter=FieldFilter("상태", "==", PAUSED)).stream()
     rows = [d.to_dict() for d in docs]
     rows.sort(key=lambda r: (r["일시정지일자"], r["일시정지시간"]), reverse=True)
     return rows
