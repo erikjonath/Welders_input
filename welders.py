@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 from datetime import datetime, timedelta
 from io import BytesIO
 from time import time_ns
@@ -23,6 +24,16 @@ WORKERS = {
     "1직3반": ["바유함자", "아프릴라", "데디", "사뿌트라", "무지오노", "수다르모노", "유누스", "푸풍", "아흐마드샤피", "안자스"],
     "1직4반": ["라마", "샤리푸딘", "시딕", "알피안디", "카릴", "파이잘", "푸트라", "프라무디아", "헨드리"],
 }
+
+# Worker passwords follow the requested pattern: worker name + 직반 digits,
+# e.g. 에릭 in 1직1반 signs in with ID 에릭 and password 에릭11.
+WORKER_ACCOUNTS: dict[str, dict[str, str]] = {}
+for _team, _names in WORKERS.items():
+    _team_code = "".join(char for char in _team if char.isdigit())
+    for _worker_name in _names:
+        if _worker_name in WORKER_ACCOUNTS or _worker_name == "admin":
+            raise ValueError(f"Duplicate or reserved login ID: {_worker_name}")
+        WORKER_ACCOUNTS[_worker_name] = {"team": _team, "password": f"{_worker_name}{_team_code}"}
 
 ACTIVE, PAUSED, DONE, CANCELED = "진행중", "일시정지", "완료", "취소"
 INPUT_MODE = "직접입력"  
@@ -49,6 +60,58 @@ if "cookie_checked" not in st.session_state:
 # ---------------------------------------------------------------- data ----
 def fmt(ts: datetime) -> tuple[str, str]:
     return ts.strftime("%Y-%m-%d"), ts.strftime("%H:%M:%S")
+
+# -------------------------------------------------------------- login ----
+def configured_admin_password() -> str:
+    """Read the admin password from Streamlit secrets, never from this source file."""
+    auth_secrets = st.secrets.get("auth", {})
+    return str(auth_secrets.get("admin_password", ""))
+
+
+def authenticate(login_id: str, password: str) -> dict | None:
+    if login_id == "admin":
+        expected = configured_admin_password()
+        if expected and hmac.compare_digest(password, expected):
+            return {"role": "admin", "name": "admin"}
+        return None
+
+    account = WORKER_ACCOUNTS.get(login_id)
+    if account and hmac.compare_digest(password, account["password"]):
+        return {"role": "worker", "name": login_id, "team": account["team"]}
+    return None
+
+
+def login_page():
+    st.title("용접 실적 입력 로그인")
+    st.caption("ID와 비밀번호를 입력하세요.")
+    if not configured_admin_password():
+        st.warning("관리자 로그인을 사용하려면 Streamlit Secrets에 [auth] admin_password를 설정하세요.")
+
+    show_password = st.checkbox("비밀번호 표시", key="login_show_password")
+    with st.form("login_form", clear_on_submit=True):
+        login_id = st.text_input("ID", key="login_id")
+        password = st.text_input(
+            "비밀번호",
+            type="default" if show_password else "password",
+            key="login_password",
+        )
+        submitted = st.form_submit_button("로그인", type="primary", width="stretch")
+
+    if submitted:
+        user = authenticate(login_id.strip(), password)
+        if user:
+            st.session_state.current_user = user
+            st.rerun()
+        st.error("ID 또는 비밀번호가 올바르지 않습니다.")
+
+
+def current_user() -> dict:
+    return st.session_state.current_user
+
+
+def is_admin() -> bool:
+    return current_user()["role"] == "admin"
+
 
 # ------------------------------------------------------------ database ----
 class JointTaken(Exception):
@@ -144,8 +207,6 @@ def _cancel_tx(tx, jref, lref, seg_id: int):
     tx.update(lref, {"상태": CANCELED})
     tx.update(jref, {"상태": CANCELED, "base_progress": 0})
 
-get_db()
-
 # ---------------------------------------------------------------- shared ----
 def nav_bar(current: str):
     with st.container(horizontal=True, key="navbar"):
@@ -155,6 +216,13 @@ def nav_bar(current: str):
             )
             if clicked and key != current:
                 st.switch_page(PAGES[key])
+    user = current_user()
+    display_name = "관리자" if is_admin() else f"{user['team']} · {user['name']}"
+    with st.container(horizontal=True):
+        st.caption(f"로그인: {display_name}")
+        if st.button("로그아웃", key="nav_logout", width="stretch"):
+            st.session_state.pop("current_user", None)
+            st.rerun()
     st.write("")
 
 def pick_worker(key: str = "w", exclude: tuple[str, str] | None = None) -> tuple[str | None, str | None]:
@@ -251,23 +319,27 @@ def start_controls(rec: dict, prev: dict | None, me: tuple[str, str] | None, key
             f"⏸ 일시정지된 JOINT — 진행률 **{prev['진행률'] or 0}%** · "
             f"이전 작업자 {prev_worker[0]} {prev_worker[1]}"
         )
-        choice = st.radio(
-            "작업 방식",
-            ["용접계속", "용접사 변경"],
-            index=None,
-            horizontal=True,
-            captions=[f"{prev_worker[0]} {prev_worker[1]}", "다른 용접사가 이어서 작업"],
-            key=f"{key}_choice",
-        )
-        if choice is None:
+        if is_admin():
+            choice = st.radio(
+                "작업 방식",
+                ["용접계속", "용접사 변경"],
+                index=None,
+                horizontal=True,
+                captions=[f"{prev_worker[0]} {prev_worker[1]}", "다른 용접사가 이어서 작업"],
+                key=f"{key}_choice",
+            )
+            if choice is None:
+                return
+            if choice == "용접계속":
+                worker = prev_worker
+            else:
+                if me and me != prev_worker and f"{key}_team" not in st.session_state:
+                    st.session_state[f"{key}_team"], st.session_state[f"{key}_name"] = me
+                st.caption("이어서 작업할 용접사를 선택하세요.")
+                worker = pick_worker(key, exclude=prev_worker)
+        elif prev_worker != me:
+            st.error("다른 작업자의 JOINT에는 접근할 수 없습니다.")
             return
-        if choice == "용접계속":
-            worker = prev_worker
-        else:
-            if me and me != prev_worker and f"{key}_team" not in st.session_state:
-                st.session_state[f"{key}_team"], st.session_state[f"{key}_name"] = me
-            st.caption("이어서 작업할 용접사를 선택하세요.")
-            worker = pick_worker(key, exclude=prev_worker)
     if not worker or not worker[1]:
         return
     record = {"직반": worker[0], "작업자": worker[1], **rec}
@@ -292,7 +364,18 @@ def start_search(me: tuple[str, str]):
         return
 
     seg = latest_by_joint(project).get((spool, tag, joint))
+    if (
+        seg
+        and seg["상태"] == PAUSED
+        and not is_admin()
+        and (seg["직반"], seg["작업자"]) != me
+    ):
+        st.warning("이 JOINT는 다른 작업자의 일시정지 작업입니다.")
+        return
     if seg and seg["상태"] in (ACTIVE, DONE):
+        if not is_admin() and (seg["직반"], seg["작업자"]) != me:
+            st.warning("이미 사용할 수 없는 JOINT입니다.")
+            return
         who = f" ({seg['직반']} {seg['작업자']})" if seg["상태"] == ACTIVE else ""
         st.warning(f"이미 {seg['상태']}인 JOINT입니다.{who}")
         return
@@ -327,12 +410,15 @@ def cancel_dialog(prev: dict):
 
 def paused_section(me: tuple[str, str] | None):
     rows = paused_joints()
+    if not is_admin():
+        rows = [r for r in rows if (r["직반"], r["작업자"]) == me]
     st.subheader(f"⏸ 일시정지 목록 ({len(rows)}건)")
     if not rows:
         st.caption("일시정지된 JOINT가 없습니다.")
         return
 
-    rows.sort(key=lambda r: (r["직반"], r["작업자"]) != me)  
+    if is_admin():
+        rows.sort(key=lambda r: (r["직반"], r["작업자"]) != me)
     table = pd.DataFrame(
         {
             "이름": r["작업자"],
@@ -345,7 +431,8 @@ def paused_section(me: tuple[str, str] | None):
         }
         for r in rows
     )
-    st.caption("항목을 선택하면 용접계속 또는 용접사 변경 후 다시 시작할 수 있습니다.")
+    st.caption("항목을 선택하면 용접계속 또는 용접사 변경 후 다시 시작할 수 있습니다." if is_admin()
+               else "본인의 일시정지 작업만 표시됩니다.")
     event = st.dataframe(
         table,
         hide_index=True,
@@ -383,10 +470,17 @@ def start_page():
     if err := st.session_state.pop("start_error", None):
         st.error(err)
 
-    team, name = pick_worker()
-    me = (team, name) if name else None
+    user = current_user()
+    if is_admin():
+        team, name = pick_worker()
+        me = (team, name) if name else None
+    else:
+        team, name = user["team"], user["name"]
+        me = (team, name)
+        st.info(f"작업자: {team} · {name}")
     if me:
-        remember_worker(*me)
+        if is_admin():
+            remember_worker(*me)
         start_search(me)
 
     st.divider()
@@ -479,8 +573,8 @@ def my_active_section(team: str, name: str):
     if done:
         finish_dialog(records[rid], now())
 
-def active_list_section():
-    rows = active_segments()
+def active_list_section(me: tuple[str, str] | None = None):
+    rows = active_segments(*me) if me else active_segments()
     st.subheader(f"🔧 진행중 목록 ({len(rows)}건)")
     if not rows:
         st.caption("진행중인 JOINT가 없습니다.")
@@ -506,13 +600,21 @@ def finish_page():
     if msg := st.session_state.pop("finish_msg", None):
         (st.success if msg[0] == "success" else st.error)(msg[1])
 
-    team, name = pick_worker()
-    if name:
-        remember_worker(team, name)
+    user = current_user()
+    if is_admin():
+        team, name = pick_worker()
+        me = (team, name) if name else None
+        if me:
+            remember_worker(*me)
+            my_active_section(team, name)
+    else:
+        team, name = user["team"], user["name"]
+        me = (team, name)
+        st.info(f"작업자: {team} · {name}")
         my_active_section(team, name)
 
     st.divider()
-    active_list_section()
+    active_list_section(None if is_admin() else me)
 
 # ------------------------------------------------------- 용접목록 page ----
 def to_excel(df: pd.DataFrame) -> bytes:
@@ -535,6 +637,13 @@ def list_page():
         return
 
     df = df.sort_values("id").reset_index(drop=True) 
+    if not is_admin():
+        user = current_user()
+        df = df[(df["직반"] == user["team"]) & (df["작업자"] == user["name"])].copy()
+        if df.empty:
+            st.info("저장된 작업 기록이 없습니다.")
+            return
+
     start = pd.to_datetime(df["용접시작일자"].str.cat(df["용접시작시간"], sep=" "))
     end_date = df["용접완료일자"].fillna(df["일시정지일자"])
     end_time = df["용접완료시간"].fillna(df["일시정지시간"])
@@ -553,10 +662,14 @@ def list_page():
     df = df.iloc[::-1]  
 
     with st.expander("필터", expanded=True):
-        c1, c2 = st.columns(2)
-        team = c1.selectbox("직반", ["전체", *WORKERS], key="l_team")
-        names = sorted(df["작업자"].unique()) if team == "전체" else WORKERS[team]
-        name = c2.selectbox("이름", ["전체", *names], key=f"l_name_{team}")
+        if is_admin():
+            c1, c2 = st.columns(2)
+            team = c1.selectbox("직반", ["전체", *WORKERS], key="l_team")
+            names = sorted(df["작업자"].unique()) if team == "전체" else WORKERS[team]
+            name = c2.selectbox("이름", ["전체", *names], key=f"l_name_{team}")
+        else:
+            team, name = user["team"], user["name"]
+            st.caption(f"내 기록만 조회할 수 있습니다: {team} · {name}")
         status = st.radio("상태", ["전체", ACTIVE, PAUSED, DONE, CANCELED], horizontal=True, key="l_status")
         first, last = start.min().date(), start.max().date()
         period = st.date_input("용접시작일자 기간", (first, last), key="l_period")
@@ -632,4 +745,9 @@ PAGES = {
     "finish": st.Page(finish_page, title="용접완료", icon="✅", url_path="finish"),
     "list": st.Page(list_page, title="용접목록", icon="📋", url_path="list"),
 }
+if not st.session_state.get("current_user"):
+    login_page()
+    st.stop()
+
+get_db()
 st.navigation(list(PAGES.values()), position="hidden").run()
