@@ -1,14 +1,13 @@
-import base64
 import hashlib
 import hmac
-import json
 import re
+import smtplib
+import ssl
 from datetime import datetime, timedelta
+from email.message import EmailMessage
 from io import BytesIO
 from time import time_ns
 from urllib.parse import quote, unquote
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -727,48 +726,41 @@ def to_excel(df: pd.DataFrame) -> bytes:
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 def send_excel_email(recipient: str, filename: str, data: bytes):
-    """Send an Excel attachment through the configured Resend email API."""
+    """Send an Excel attachment from the configured Gmail account over SMTP/TLS."""
     email_settings = st.secrets.get("email", {})
-    api_key = str(email_settings.get("resend_api_key", "")).strip()
-    sender = str(email_settings.get("from_email", "")).strip()
-    if not api_key or not sender:
+    sender = str(email_settings.get("gmail_address", "")).strip()
+    app_password = re.sub(r"\s+", "", str(email_settings.get("gmail_app_password", "")))
+    if not sender or not app_password:
         raise ValueError(
-            "이메일 발송 설정이 없습니다. Streamlit Secrets의 [email] 설정을 확인하세요."
+            "Gmail 발송 설정이 없습니다. Streamlit Secrets의 [email] 설정을 확인하세요."
         )
 
-    if len(data) * 4 / 3 > 40 * 1024 * 1024:
-        raise ValueError("파일이 이메일 첨부 한도(약 40 MB)를 초과합니다. Excel을 다운로드하세요.")
-
-    payload = {
-        "from": sender,
-        "to": [recipient],
-        "subject": f"용접 실적 Excel 파일: {filename}",
-        "text": "요청하신 용접 실적 Excel 파일을 첨부합니다.",
-        "attachments": [{
-            "filename": filename,
-            "content": base64.b64encode(data).decode("ascii"),
-            "content_type": XLSX_MIME,
-        }],
-    }
-    request = Request(
-        "https://api.resend.com/emails",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
+    message = EmailMessage()
+    message["Subject"] = f"용접 실적 Excel 파일: {filename}"
+    message["From"] = sender
+    message["To"] = recipient
+    message.set_content("요청하신 용접 실적 Excel 파일을 첨부합니다.")
+    message.add_attachment(
+        data,
+        maintype="application",
+        subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=filename,
     )
     try:
-        with urlopen(request, timeout=30) as response:
-            if response.status < 200 or response.status >= 300:
-                raise ValueError(f"이메일 서비스가 발송을 거부했습니다. (HTTP {response.status})")
-    except HTTPError as exc:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
+            server.ehlo()
+            server.starttls(context=ssl.create_default_context())
+            server.ehlo()
+            server.login(sender, app_password)
+            server.send_message(message)
+    except smtplib.SMTPAuthenticationError as exc:
         raise ValueError(
-            f"이메일 발송에 실패했습니다. (HTTP {exc.code}) API 키와 승인된 발신 주소를 확인하세요."
+            "Gmail 로그인이 거부되었습니다. Gmail 주소와 Google App Password를 확인하세요."
         ) from exc
-    except URLError as exc:
-        raise ValueError("이메일 서비스에 연결하지 못했습니다. 잠시 후 다시 시도하세요.") from exc
+    except (smtplib.SMTPException, OSError, TimeoutError) as exc:
+        raise ValueError(
+            "Gmail 서버에 연결하거나 메일을 보내지 못했습니다. 설정을 확인하고 다시 시도하세요."
+        ) from exc
 
 def list_page():
     if not can_manage_team():
@@ -905,8 +897,8 @@ def list_page():
         placeholder="name@example.com",
     ).strip()
     email_settings = st.secrets.get("email", {})
-    if not email_settings.get("resend_api_key") or not email_settings.get("from_email"):
-        st.caption("메일 발송을 사용하려면 Streamlit Secrets에 이메일 서비스 설정이 필요합니다.")
+    if not email_settings.get("gmail_address") or not email_settings.get("gmail_app_password"):
+        st.caption("메일 발송을 사용하려면 Streamlit Secrets에 Gmail 주소와 Google App Password를 설정하세요.")
     with st.container(horizontal=True):
         send_recent = st.button("📧 최근 3일 Excel 보내기", width="stretch", key="send_recent_email")
         send_all = st.button("📧 전체 Excel 보내기", width="stretch", key="send_all_email")
