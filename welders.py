@@ -48,21 +48,24 @@ if "cookie_checked" not in st.session_state:
             st.session_state.w_name = _name
             st.session_state.cookie_saved = (_team, _name)
 
-# Large page buttons used instead of page titles
-st.html(
-    """
-    <style>
-    div[class*="st-key-nav_"] button { min-height: 3.2rem; }
-    div[class*="st-key-nav_"] button p { font-size: 1.1rem; font-weight: 700; }
-    .st-key-navbar { flex-wrap: nowrap; gap: 0.4rem; }
-    .st-key-navbar > div { flex: 1 1 0; min-width: 0; }
-    @media (max-width: 640px) {
-        div[class*="st-key-nav_"] button { padding-left: 0.2rem; padding-right: 0.2rem; }
-        div[class*="st-key-nav_"] button p { font-size: 0.95rem; }
-    }
-    </style>
-    """
-)
+# Replace these imports at the top if necessary:
+import firebase_admin
+from firebase_admin import credentials, firestore as firebase_firestore
+
+# Update your client getter functions:
+@st.cache_resource
+def _client():
+    if not firebase_admin._apps:
+        cred = credentials.Certificate(dict(st.secrets["firebase"]))
+        firebase_admin.initialize_app(cred)
+    return firebase_firestore.client()
+
+def get_db():
+    try:
+        return _client()
+    except Exception as e:
+        st.error(f"Firebase에 연결할 수 없습니다. Secrets의 [firebase] 설정을 확인하세요. ({type(e).__name__})")
+        st.stop()
 
 
 # ---------------------------------------------------------------- data ----
