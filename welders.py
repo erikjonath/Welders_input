@@ -7,6 +7,8 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
+import firebase_admin
+from firebase_admin import credentials, firestore as firebase_firestore
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 
@@ -21,23 +23,18 @@ WORKERS = {
     "1직4반": ["라마", "샤리푸딘", "시딕", "알피안디", "카릴", "파이잘", "푸트라", "프라무디아", "헨드리"],
 }
 
-# Each row in welding_log is one work segment by one welder; 상태 says how the segment ended.
-# 취소 = a paused segment whose joint was cancelled: its progress stays on record, but the joint starts again from 0%.
 ACTIVE, PAUSED, DONE, CANCELED = "진행중", "일시정지", "완료", "취소"
-INPUT_MODE = "직접입력"  # SPOOL / JOINT numbers are always typed by the welder
+INPUT_MODE = "직접입력"  
 JOINT_COLS = ("프로젝트번호", "SPOOL_NO", "TAG_NO", "JOINT_NO")
 LOG_COLUMNS = ["id", "직반", "작업자", "프로젝트번호", "입력방식", "SPOOL_NO", "TAG_NO", "JOINT_NO", "상태", "진행률",
                "용접시작일자", "용접시작시간", "일시정지일자", "일시정지시간", "용접완료일자", "용접완료시간"]
 
 st.set_page_config(page_title="용접 실적 입력", page_icon="🔥", layout="centered")
 
-# Streamlit drops widget values when a widget is not drawn (other page / hidden step).
-# Re-assigning them keeps 직반, 이름 and the start form filled in when the user comes back.
 for _key in list(st.session_state.keys()):
     if _key.startswith(("w_", "s_", "c_")):
         st.session_state[_key] = st.session_state[_key]
 
-# New session on this phone: restore the 직반 / 이름 it used last time.
 if "cookie_checked" not in st.session_state:
     st.session_state.cookie_checked = True
     _team = unquote(st.context.cookies.get("welder_team", ""))
@@ -48,46 +45,20 @@ if "cookie_checked" not in st.session_state:
             st.session_state.w_name = _name
             st.session_state.cookie_saved = (_team, _name)
 
-# Replace these imports at the top if necessary:
-import firebase_admin
-from firebase_admin import credentials, firestore as firebase_firestore
-
-# Update your client getter functions:
-@st.cache_resource
-def _client():
-    if not firebase_admin._apps:
-        cred = credentials.Certificate(dict(st.secrets["firebase"]))
-        firebase_admin.initialize_app(cred)
-    return firebase_firestore.client()
-
-def get_db():
-    try:
-        return _client()
-    except Exception as e:
-        st.error(f"Firebase에 연결할 수 없습니다. Secrets의 [firebase] 설정을 확인하세요. ({type(e).__name__})")
-        st.stop()
-
-
 # ---------------------------------------------------------------- data ----
 def fmt(ts: datetime) -> tuple[str, str]:
     return ts.strftime("%Y-%m-%d"), ts.strftime("%H:%M:%S")
 
-
 # ------------------------------------------------------------ database ----
-# Firestore layout:
-#   welding_log/{id}  one document per work segment of one welder (the full history, read by 용접목록)
-#   joints/{hash}     one document per joint: a copy of its latest segment plus `base_progress`
-#                     (진행률 reached so far in the current cycle; a 용접취소 resets it to 0).
-# The joints document is what makes "only one 진행중/완료 segment per joint" safe: it is read and
-# written inside a transaction, so two welders cannot start the same joint at the same moment.
 class JointTaken(Exception):
     """The joint changed state while the user was looking at it."""
 
-
 @st.cache_resource
 def _client() -> firestore.Client:
-    return firestore.Client.from_service_account_info(dict(st.secrets["firebase"]))
-
+    if not firebase_admin._apps:
+        cred = credentials.Certificate(dict(st.secrets["firebase"]))
+        firebase_admin.initialize_app(cred)
+    return firebase_firestore.client()
 
 def get_db() -> firestore.Client:
     try:
@@ -96,40 +67,31 @@ def get_db() -> firestore.Client:
         st.error(f"Firebase에 연결할 수 없습니다. Secrets의 [firebase] 설정을 확인하세요. ({type(e).__name__})")
         st.stop()
 
-
 def now() -> datetime:
     return datetime.now(KST).replace(tzinfo=None)
-
 
 def joint_ref(rec: dict):
     key = "|".join(str(rec[c]) for c in JOINT_COLS)
     return get_db().collection("joints").document(hashlib.sha1(key.encode("utf-8")).hexdigest())
 
-
 def log_ref(seg_id: int):
     return get_db().collection("welding_log").document(str(seg_id))
-
 
 def clear_cache():
     for fn in (latest_by_joint, paused_joints, _active_all, load_log):
         fn.clear()
 
-
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def latest_by_joint(project: str) -> dict[tuple[str, str, str], dict]:
-    """Latest segment of every joint in the project that has been started at least once."""
     docs = get_db().collection("joints").where(filter=FieldFilter("프로젝트번호", "==", project)).stream()
     return {(d["SPOOL_NO"], d["TAG_NO"], d["JOINT_NO"]): d for d in (x.to_dict() for x in docs)}
 
-
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def paused_joints() -> list[dict]:
-    """Joints whose latest segment is paused, i.e. waiting for someone to continue."""
     docs = get_db().collection("joints").where(filter=FieldFilter("상태", "==", PAUSED)).stream()
     rows = [d.to_dict() for d in docs]
     rows.sort(key=lambda r: (r["일시정지일자"], r["일시정지시간"]), reverse=True)
     return rows
-
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def _active_all() -> list[dict]:
@@ -138,16 +100,12 @@ def _active_all() -> list[dict]:
     rows.sort(key=lambda r: (r["용접시작일자"], r["용접시작시간"]))
     return rows
 
-
 def active_segments(team: str | None = None, name: str | None = None) -> list[dict]:
     rows = _active_all()
     return [r for r in rows if r["직반"] == team and r["작업자"] == name] if name else rows
 
-
 def joint_progress(rec: dict) -> int:
-    """진행률 already reached by earlier (paused) segments of this joint."""
     return (joint_ref(rec).get().to_dict() or {}).get("base_progress", 0)
-
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def load_log() -> pd.DataFrame:
@@ -155,7 +113,6 @@ def load_log() -> pd.DataFrame:
     df = pd.DataFrame(rows).reindex(columns=LOG_COLUMNS)
     df["진행률"] = pd.to_numeric(df["진행률"])
     return df
-
 
 @firestore.transactional
 def _start_tx(tx, jref, lref, seg: dict):
@@ -167,7 +124,6 @@ def _start_tx(tx, jref, lref, seg: dict):
     tx.set(lref, seg)
     tx.set(jref, {**seg, "base_progress": base})
 
-
 @firestore.transactional
 def _end_tx(tx, jref, lref, seg_id: int, changes: dict, base: int):
     cur = jref.get(transaction=tx).to_dict()
@@ -175,7 +131,6 @@ def _end_tx(tx, jref, lref, seg_id: int, changes: dict, base: int):
         raise JointTaken
     tx.update(lref, changes)
     tx.update(jref, {**changes, "base_progress": base})
-
 
 @firestore.transactional
 def _cancel_tx(tx, jref, lref, seg_id: int):
@@ -185,9 +140,7 @@ def _cancel_tx(tx, jref, lref, seg_id: int):
     tx.update(lref, {"상태": CANCELED})
     tx.update(jref, {"상태": CANCELED, "base_progress": 0})
 
-
-get_db()  # stop early with a clear message when the Firebase secrets are missing
-
+get_db()
 
 # ---------------------------------------------------------------- shared ----
 def nav_bar(current: str):
@@ -199,7 +152,6 @@ def nav_bar(current: str):
             if clicked and key != current:
                 st.switch_page(PAGES[key])
     st.write("")
-
 
 def pick_worker(key: str = "w", exclude: tuple[str, str] | None = None) -> tuple[str | None, str | None]:
     team = st.selectbox(
@@ -218,9 +170,7 @@ def pick_worker(key: str = "w", exclude: tuple[str, str] | None = None) -> tuple
     name = st.selectbox("이름", names, index=None, placeholder="이름을 선택하세요", key=f"{key}_name")
     return team, name
 
-
 def remember_worker(team: str, name: str):
-    """Store 직반 / 이름 in a cookie so this phone is filled in automatically next time."""
     if st.session_state.get("cookie_saved") == (team, name):
         return
     st.session_state.cookie_saved = (team, name)
@@ -230,7 +180,6 @@ def remember_worker(team: str, name: str):
         f"document.cookie = 'welder_name={quote(name)}; {attrs}';</script>",
         unsafe_allow_javascript=True,
     )
-
 
 def show_record(rec: dict, extra: dict | None = None):
     rows = {
@@ -243,17 +192,14 @@ def show_record(rec: dict, extra: dict | None = None):
     }
     st.table(pd.DataFrame({"내용": list(rows.values())}, index=list(rows.keys())))
 
-
 def yes_no() -> tuple[bool, bool]:
     with st.container(horizontal=True):
         yes = st.button("예", type="primary", width="stretch")
         no = st.button("아니오", width="stretch")
     return yes, no
 
-
 def joint_label(rec: dict) -> str:
     return f"SPOOL {rec['SPOOL_NO']} / JOINT {rec['JOINT_NO']}"
-
 
 # ------------------------------------------------------- 용접시작 page ----
 def save_start(rec: dict, ts: datetime):
@@ -275,7 +221,6 @@ def save_start(rec: dict, ts: datetime):
     st.session_state.start_result = {**rec, "date": date, "time": time}
     st.session_state.start_reset = True
 
-
 @st.dialog("용접시작 확인")
 def start_dialog(rec: dict, prev: dict | None, ts: datetime):
     extra = {}
@@ -294,9 +239,7 @@ def start_dialog(rec: dict, prev: dict | None, ts: datetime):
     if no:
         st.rerun()
 
-
 def start_controls(rec: dict, prev: dict | None, me: tuple[str, str] | None, key: str):
-    """Choose who welds (continue / change welder for a paused joint), then the 용접시작 button."""
     worker = me
     if prev:
         prev_worker = (prev["직반"], prev["작업자"])
@@ -327,13 +270,10 @@ def start_controls(rec: dict, prev: dict | None, me: tuple[str, str] | None, key
     if st.button("용접시작", type="primary", width="stretch", key=f"go_{key}"):
         start_dialog(record, prev, now())
 
-
 PROJECTS = ["SN2686", "SN2688"]
 OTHER_PROJECT = "직접입력"
 
-
 def start_search(me: tuple[str, str]):
-    """Project (2 defaults or typed), SPOOL NO and JOINT NO; typed values are stored in upper case."""
     choice = st.radio("프로젝트", [*PROJECTS, OTHER_PROJECT], index=None, horizontal=True, key="s_project")
     if choice == OTHER_PROJECT:
         project = st.text_input("프로젝트 직접 입력", key="s_project_other", placeholder="프로젝트 번호 입력").strip().upper()
@@ -343,7 +283,7 @@ def start_search(me: tuple[str, str]):
         return
     spool = st.text_input("SPOOL NO", key="s_spool", placeholder="SPOOL NO 입력").strip().upper()
     joint = st.text_input("JOINT NO", key="s_joint", placeholder="JOINT NO 입력").strip().upper()
-    tag = ""  # TAG NO is no longer used; kept as an empty field so the stored joint key stays the same
+    tag = "" 
     if not (spool and joint):
         return
 
@@ -355,7 +295,6 @@ def start_search(me: tuple[str, str]):
     prev = seg if seg and seg["상태"] == PAUSED else None
     rec = {"프로젝트번호": project, "입력방식": INPUT_MODE, "SPOOL_NO": spool, "TAG_NO": tag, "JOINT_NO": joint}
     start_controls(rec, prev, me, key=f"c_s_{project}_{spool}_{tag}_{joint}")
-
 
 def cancel_joint(prev: dict):
     try:
@@ -370,7 +309,6 @@ def cancel_joint(prev: dict):
         f"일시정지까지의 진행률 {prev['진행률'] or 0}%는 기록에 저장되고, 이 JOINT는 0%부터 다시 시작합니다.",
     )
 
-
 @st.dialog("용접취소 확인")
 def cancel_dialog(prev: dict):
     show_record(prev, {"일시정지 진행률": f"{prev['진행률'] or 0}%"})
@@ -383,7 +321,6 @@ def cancel_dialog(prev: dict):
     if no:
         st.rerun()
 
-
 def paused_section(me: tuple[str, str] | None):
     rows = paused_joints()
     st.subheader(f"⏸ 일시정지 목록 ({len(rows)}건)")
@@ -391,7 +328,7 @@ def paused_section(me: tuple[str, str] | None):
         st.caption("일시정지된 JOINT가 없습니다.")
         return
 
-    rows.sort(key=lambda r: (r["직반"], r["작업자"]) != me)  # this welder's joints first
+    rows.sort(key=lambda r: (r["직반"], r["작업자"]) != me)  
     table = pd.DataFrame(
         {
             "이름": r["작업자"],
@@ -411,7 +348,6 @@ def paused_section(me: tuple[str, str] | None):
         width="stretch",
         on_select="rerun",
         selection_mode="single-row",
-        # New key whenever the list changes, so a stale row selection never points at another joint.
         key=f"tbl_paused_{hash(tuple(r['id'] for r in rows))}",
         column_config={
             "진행률": st.column_config.ProgressColumn("진행률", format="%d%%", min_value=0, max_value=100)
@@ -427,11 +363,9 @@ def paused_section(me: tuple[str, str] | None):
     rec = {k: prev[k] for k in ("프로젝트번호", "입력방식", "SPOOL_NO", "TAG_NO", "JOINT_NO")}
     start_controls(rec, prev, me, key=f"c_p_{prev['id']}")
 
-
 def start_page():
     nav_bar("start")
     if st.session_state.pop("start_reset", False):
-        # Keep 직반 / 이름 / 프로젝트 for the next joint; clear SPOOL NO, JOINT NO and the choices.
         for key in list(st.session_state):
             if key in ("s_spool", "s_joint") or key.startswith("c_"):
                 del st.session_state[key]
@@ -454,7 +388,6 @@ def start_page():
     st.divider()
     paused_section(me)
 
-
 # ------------------------------------------------------- 용접완료 page ----
 def end_segment(rec: dict, ts: datetime, status: str, progress: int):
     date, time = fmt(ts)
@@ -476,7 +409,6 @@ def end_segment(rec: dict, ts: datetime, status: str, progress: int):
             st.session_state.finish_msg = ("success", f"용접완료 등록 완료: **{date} {time}**  \n{joint_label(rec)}")
     st.session_state.pop("f_record", None)
 
-
 @st.dialog("용접완료 확인")
 def finish_dialog(rec: dict, ts: datetime):
     show_record(rec, {"용접시작": f"{rec['용접시작일자']} {rec['용접시작시간']}"})
@@ -489,7 +421,6 @@ def finish_dialog(rec: dict, ts: datetime):
         st.rerun()
     if no:
         st.rerun()
-
 
 @st.dialog("일시정지 확인")
 def pause_dialog(rec: dict, min_progress: int, ts: datetime):
@@ -512,7 +443,6 @@ def pause_dialog(rec: dict, min_progress: int, ts: datetime):
         st.rerun()
     if no:
         st.rerun()
-
 
 def my_active_section(team: str, name: str):
     records = {r["id"]: r for r in active_segments(team, name)}
@@ -545,7 +475,6 @@ def my_active_section(team: str, name: str):
     if done:
         finish_dialog(records[rid], now())
 
-
 def active_list_section():
     rows = active_segments()
     st.subheader(f"🔧 진행중 목록 ({len(rows)}건)")
@@ -568,7 +497,6 @@ def active_list_section():
         width="stretch",
     )
 
-
 def finish_page():
     nav_bar("finish")
     if msg := st.session_state.pop("finish_msg", None):
@@ -582,7 +510,6 @@ def finish_page():
     st.divider()
     active_list_section()
 
-
 # ------------------------------------------------------- 용접목록 page ----
 def to_excel(df: pd.DataFrame) -> bytes:
     buf = BytesIO()
@@ -594,7 +521,6 @@ def to_excel(df: pd.DataFrame) -> bytes:
             sheet.column_dimensions[col_cells[0].column_letter].width = min(max(width * 1.3 + 2, 8), 40)
     return buf.getvalue()
 
-
 def list_page():
     nav_bar("list")
     if st.button("🔄 새로고침", key="l_refresh"):
@@ -604,14 +530,14 @@ def list_page():
         st.info("저장된 데이터가 없습니다.")
         return
 
-    df = df.sort_values("id").reset_index(drop=True)  # oldest first, so progress can be compared with the previous segment
+    df = df.sort_values("id").reset_index(drop=True) 
     start = pd.to_datetime(df["용접시작일자"].str.cat(df["용접시작시간"], sep=" "))
     end_date = df["용접완료일자"].fillna(df["일시정지일자"])
     end_time = df["용접완료시간"].fillna(df["일시정지시간"])
     end = pd.to_datetime(end_date.str.cat(end_time, sep=" "))
     df["소요시간(분)"] = ((end - start).dt.total_seconds() / 60).round(1)
     joint = df.groupby(list(JOINT_COLS))
-    # A 용접취소 restarts the joint at 0%, so progress and time are counted per cycle between cancellations.
+    
     cancelled = df["상태"] == CANCELED
     df["_cycle"] = cancelled.groupby([df[c] for c in JOINT_COLS]).cumsum() - cancelled
     cycle = df.groupby([*JOINT_COLS, "_cycle"])
@@ -620,7 +546,7 @@ def list_page():
     df["당일 진행률(%)"] = (df["진행률"] - cycle["진행률"].shift().fillna(0)).astype("Int64")
     is_latest = df["id"] == joint["id"].transform("max")
     start, is_latest = start[::-1], is_latest[::-1]
-    df = df.iloc[::-1]  # newest first
+    df = df.iloc[::-1]  
 
     with st.expander("필터", expanded=True):
         c1, c2 = st.columns(2)
@@ -667,14 +593,11 @@ def list_page():
         },
     )
 
-    # Downloads are independent of the table filters: one scope for the past three
-    # Korean calendar days (including today), and one for the full history.
     today = now().date()
     recent_start = today - timedelta(days=2)
     recent_export = df.loc[start.dt.date.between(recent_start, today), columns]
     all_export = df[columns]
 
-    # ASCII file names and UTF-8 BOM: Korean file names / CSV encodings can break on phones.
     stamp = now().strftime("%Y%m%d_%H%M")
     st.subheader("다운로드")
     st.caption(
@@ -714,10 +637,9 @@ def list_page():
         )
     st.caption("휴대폰에서는 Excel 파일을 권장합니다. (한글이 깨지지 않음)")
 
-
 # ---------------------------------------------------------------- app ----
 PAGES = {
-    "start": st.Page(start_page, title="용접시작", icon="🔥", default=True),  # served at the root URL
+    "start": st.Page(start_page, title="용접시작", icon="🔥", default=True),
     "finish": st.Page(finish_page, title="용접완료", icon="✅", url_path="finish"),
     "list": st.Page(list_page, title="용접목록", icon="📋", url_path="list"),
 }
