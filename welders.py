@@ -301,6 +301,12 @@ def remember_worker(team: str, name: str):
         unsafe_allow_javascript=True,
     )
 
+
+def uppercase_input(key: str):
+    value = st.session_state.get(key)
+    if isinstance(value, str):
+        st.session_state[key] = value.upper()
+
 def show_record(rec: dict, extra: dict | None = None):
     rows = {
         "직반": rec["직반"],
@@ -406,8 +412,20 @@ def start_search(me: tuple[str, str]):
         project = choice
     if not project:
         return
-    spool = st.text_input("SPOOL NO", key="s_spool", placeholder="SPOOL NO 입력").strip().upper()
-    joint = st.text_input("JOINT NO", key="s_joint", placeholder="JOINT NO 입력").strip().upper()
+    spool = st.text_input(
+        "SPOOL NO",
+        key="s_spool",
+        placeholder="SPOOL NO 입력",
+        on_change=uppercase_input,
+        args=("s_spool",),
+    ).strip().upper()
+    joint = st.text_input(
+        "JOINT NO",
+        key="s_joint",
+        placeholder="JOINT NO 입력",
+        on_change=uppercase_input,
+        args=("s_joint",),
+    ).strip().upper()
     tag = "" 
     if not (spool and joint):
         return
@@ -518,6 +536,9 @@ def start_page():
             f"용접시작 등록 완료: **{res['date']} {res['time']}**  \n"
             f"{res['직반']} {res['작업자']} · {joint_label(res)}"
         )
+        user = current_user()
+        if user["role"] == "worker" and active_segments(user["team"], user["name"]):
+            st.switch_page(PAGES["finish"])
     if msg := st.session_state.pop("cancel_msg", None):
         (st.success if msg[0] == "success" else st.error)(msg[1])
     if err := st.session_state.pop("start_error", None):
@@ -823,16 +844,21 @@ def list_page():
     st.caption("휴대폰에서는 Excel 파일을 권장합니다. (한글이 깨지지 않음)")
 
 # ---------------------------------------------------------------- app ----
-PAGES = {
-    "start": st.Page(start_page, title="용접시작", icon="🔥", default=True),
-    "finish": st.Page(finish_page, title="용접완료", icon="✅", url_path="finish"),
-    "list": st.Page(list_page, title="용접목록", icon="📋", url_path="list"),
-}
 if not st.session_state.get("current_user"):
     login_page()
     st.stop()
 
 get_db()
+user = current_user()
+landing_page = "start"
+if user["role"] == "worker" and active_segments(user["team"], user["name"]):
+    landing_page = "finish"
+
+PAGES = {
+    "start": st.Page(start_page, title="용접시작", icon="🔥", default=landing_page == "start"),
+    "finish": st.Page(finish_page, title="용접완료", icon="✅", url_path="finish", default=landing_page == "finish"),
+    "list": st.Page(list_page, title="용접목록", icon="📋", url_path="list"),
+}
 available_pages = [PAGES["start"], PAGES["finish"]]
 if can_manage_team():
     available_pages.append(PAGES["list"])
