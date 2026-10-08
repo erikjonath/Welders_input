@@ -1,9 +1,14 @@
+import base64
 import hashlib
 import hmac
+import json
+import re
 from datetime import datetime, timedelta
 from io import BytesIO
 from time import time_ns
 from urllib.parse import quote, unquote
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -719,6 +724,52 @@ def to_excel(df: pd.DataFrame) -> bytes:
             sheet.column_dimensions[col_cells[0].column_letter].width = min(max(width * 1.3 + 2, 8), 40)
     return buf.getvalue()
 
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+def send_excel_email(recipient: str, filename: str, data: bytes):
+    """Send an Excel attachment through the configured Resend email API."""
+    email_settings = st.secrets.get("email", {})
+    api_key = str(email_settings.get("resend_api_key", "")).strip()
+    sender = str(email_settings.get("from_email", "")).strip()
+    if not api_key or not sender:
+        raise ValueError(
+            "이메일 발송 설정이 없습니다. Streamlit Secrets의 [email] 설정을 확인하세요."
+        )
+
+    if len(data) * 4 / 3 > 40 * 1024 * 1024:
+        raise ValueError("파일이 이메일 첨부 한도(약 40 MB)를 초과합니다. Excel을 다운로드하세요.")
+
+    payload = {
+        "from": sender,
+        "to": [recipient],
+        "subject": f"용접 실적 Excel 파일: {filename}",
+        "text": "요청하신 용접 실적 Excel 파일을 첨부합니다.",
+        "attachments": [{
+            "filename": filename,
+            "content": base64.b64encode(data).decode("ascii"),
+            "content_type": XLSX_MIME,
+        }],
+    }
+    request = Request(
+        "https://api.resend.com/emails",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            if response.status < 200 or response.status >= 300:
+                raise ValueError(f"이메일 서비스가 발송을 거부했습니다. (HTTP {response.status})")
+    except HTTPError as exc:
+        raise ValueError(
+            f"이메일 발송에 실패했습니다. (HTTP {exc.code}) API 키와 승인된 발신 주소를 확인하세요."
+        ) from exc
+    except URLError as exc:
+        raise ValueError("이메일 서비스에 연결하지 못했습니다. 잠시 후 다시 시도하세요.") from exc
+
 def list_page():
     if not can_manage_team():
         st.switch_page(PAGES["start"])
@@ -824,23 +875,53 @@ def list_page():
     st.caption(
         f"최근 3일: {recent_start:%Y-%m-%d} ~ {today:%Y-%m-%d} · 용접시작일 기준 · 표 필터와 관계없이 다운로드"
     )
+    recent_filename = f"welding_last_3_days_{stamp}.xlsx"
+    recent_data = to_excel(recent_export)
+    all_filename = f"welding_all_data_{stamp}.xlsx"
+    all_data = to_excel(all_export)
+
     with st.container(horizontal=True):
         st.download_button(
             "📥 최근 3일 Excel",
-            to_excel(recent_export),
-            file_name=f"welding_last_3_days_{stamp}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            recent_data,
+            file_name=recent_filename,
+            mime=XLSX_MIME,
             type="primary",
             width="stretch",
         )
 
     st.download_button(
         "📥 전체 데이터 Excel",
-        to_excel(all_export),
-        file_name=f"welding_all_data_{stamp}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        all_data,
+        file_name=all_filename,
+        mime=XLSX_MIME,
         width="stretch",
     )
+
+    st.subheader("이메일로 보내기")
+    email_recipient = st.text_input(
+        "받는 이메일 주소",
+        key="email_recipient",
+        placeholder="name@example.com",
+    ).strip()
+    email_settings = st.secrets.get("email", {})
+    if not email_settings.get("resend_api_key") or not email_settings.get("from_email"):
+        st.caption("메일 발송을 사용하려면 Streamlit Secrets에 이메일 서비스 설정이 필요합니다.")
+    with st.container(horizontal=True):
+        send_recent = st.button("📧 최근 3일 Excel 보내기", width="stretch", key="send_recent_email")
+        send_all = st.button("📧 전체 Excel 보내기", width="stretch", key="send_all_email")
+
+    if send_recent or send_all:
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email_recipient):
+            st.error("올바른 이메일 주소를 입력하세요.")
+        else:
+            filename, data = (recent_filename, recent_data) if send_recent else (all_filename, all_data)
+            try:
+                send_excel_email(email_recipient, filename, data)
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                st.success(f"{email_recipient} 주소로 Excel 파일을 보냈습니다.")
     st.caption("휴대폰에서는 Excel 파일을 권장합니다. (한글이 깨지지 않음)")
 
 # ---------------------------------------------------------------- app ----
