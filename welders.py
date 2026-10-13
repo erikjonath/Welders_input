@@ -98,7 +98,6 @@ def authenticate(login_id: str, password: str) -> dict | None:
 
 def login_page():
     st.title("용접 실적 입력 로그인")
-    st.caption("ID와 비밀번호를 입력하세요.")
     if not configured_admin_password():
         st.warning("관리자 로그인을 사용하려면 Streamlit Secrets에 [auth] admin_password를 설정하세요.")
 
@@ -333,54 +332,12 @@ def rename_joint(rec: dict, spool: str, joint: str):
         raise ValueError(str(exc)) from exc
     clear_cache()
 
-def edit_joint_form(rows: list[dict], key: str, title: str):
-    st.subheader(title)
-    if not rows:
-        st.caption("수정할 수 있는 JOINT가 없습니다.")
-        return
-    records = {row["_doc_id"]: row for row in rows}
-    labels = {
-        doc_id: (
-            f"{row.get('프로젝트번호', '')} · {row.get('직반', '')} {row.get('작업자', '')} · "
-            f"SPOOL {row.get('SPOOL_NO', '')} / JOINT {row.get('JOINT_NO', '')}"
-        )
-        for doc_id, row in records.items()
-    }
-    if msg := st.session_state.pop(f"{key}_msg", None):
-        st.success(msg)
-    selected_id = st.selectbox(
-        "수정할 JOINT 선택",
-        list(records),
-        format_func=lambda doc_id: labels[doc_id],
-        key=f"{key}_selected",
-    )
-    rec = records[selected_id]
-    with st.form(f"{key}_form_{selected_id}"):
-        c1, c2 = st.columns(2)
-        spool = c1.text_input("SPOOL NO", value=rec["SPOOL_NO"], key=f"{key}_{selected_id}_spool")
-        joint = c2.text_input("JOINT NO", value=rec["JOINT_NO"], key=f"{key}_{selected_id}_joint")
-        submitted = st.form_submit_button("SPOOL / JOINT 수정", type="primary", width="stretch")
-    if submitted:
-        try:
-            rename_joint(rec, spool, joint)
-        except ValueError as exc:
-            st.error(str(exc))
-        else:
-            st.session_state[f"{key}_msg"] = "SPOOL NO / JOINT NO를 수정했습니다. 연결된 전체 이력에도 반영했습니다."
-            st.rerun()
-
 def visible_joint_states() -> list[dict]:
     rows = load_joint_states()
     user = current_user()
     if is_admin():
         return rows
     return [row for row in rows if row.get("직반") == user["team"]]
-
-def edit_active_joint_section(key: str):
-    editable_rows = [
-        row for row in visible_joint_states() if row.get("상태") in (ACTIVE, PAUSED)
-    ]
-    edit_joint_form(editable_rows, key, "진행 중 / 일시정지 JOINT 번호 수정")
 
 def delete_joint_records(doc_ids: list[str]):
     states = {row["_doc_id"]: row for row in visible_joint_states()}
@@ -463,7 +420,6 @@ def pick_worker(
 ) -> tuple[str | None, str | None]:
     if fixed_team:
         team = fixed_team
-        st.caption(f"직반: {team}")
     else:
         team = st.selectbox(
             "직반",
@@ -570,7 +526,6 @@ def start_controls(rec: dict, prev: dict | None, me: tuple[str, str] | None, key
                 ["용접계속", "용접사 변경"],
                 index=None,
                 horizontal=True,
-                captions=[f"{prev_worker[0]} {prev_worker[1]}", "다른 용접사가 이어서 작업"],
                 key=f"{key}_choice",
             )
             if choice is None:
@@ -580,7 +535,6 @@ def start_controls(rec: dict, prev: dict | None, me: tuple[str, str] | None, key
             else:
                 if me and me != prev_worker and f"{key}_team" not in st.session_state:
                     st.session_state[f"{key}_team"], st.session_state[f"{key}_name"] = me
-                st.caption("이어서 작업할 용접사를 선택하세요.")
                 fixed_team = None if is_admin() else current_user()["team"]
                 worker = pick_worker(key, exclude=prev_worker, fixed_team=fixed_team)
         elif prev_worker != me:
@@ -674,7 +628,6 @@ def paused_section(me: tuple[str, str] | None):
             rows = [r for r in rows if (r["직반"], r["작업자"]) == me]
     st.subheader(f"⏸ 일시정지 목록 ({len(rows)}건)")
     if not rows:
-        st.caption("일시정지된 JOINT가 없습니다.")
         return
 
     if can_manage_team():
@@ -691,10 +644,6 @@ def paused_section(me: tuple[str, str] | None):
         }
         for r in rows
     )
-    if can_manage_team():
-        st.caption("항목을 선택하면 용접계속 또는 같은 직반의 다른 용접사로 변경할 수 있습니다.")
-    else:
-        st.caption("본인의 일시정지 작업만 표시됩니다.")
     event = st.dataframe(
         table,
         hide_index=True,
@@ -720,8 +669,6 @@ def start_page():
     nav_bar("start")
     if notice := st.session_state.pop("start_notice", None):
         (st.success if notice[0] == "success" else st.error)(notice[1])
-    if st.session_state.pop("finish_access_denied", False):
-        st.info("진행 중인 JOINT가 없어 용접완료 페이지에 들어갈 수 없습니다. 일시정지 작업은 용접시작 페이지에서 다시 시작하세요.")
     if st.session_state.pop("start_reset", False):
         for key in list(st.session_state):
             if key in ("s_spool", "s_joint") or key.startswith("c_"):
@@ -750,7 +697,6 @@ def start_page():
     else:
         team, name = user["team"], user["name"]
         me = (team, name)
-        st.info(f"작업자: {team} · {name}")
     if me:
         if is_admin():
             remember_worker(*me)
@@ -758,9 +704,6 @@ def start_page():
 
     st.divider()
     paused_section(me)
-    if can_manage_team():
-        st.divider()
-        edit_active_joint_section("start_active_edit")
 
 # ------------------------------------------------------- 용접완료 page ----
 def end_segment(rec: dict, ts: datetime, status: str, progress: int):
@@ -812,15 +755,10 @@ def pause_dialog(rec: dict, min_progress: int, ts: datetime):
         return
     elif min_progress == 90:
         progress = 90
-        st.info("일시정지는 최대 90%까지입니다. 100%는 용접완료 버튼으로 등록하세요.")
     else:
         progress = st.slider(
             "진행률", min_value=min_progress, max_value=90, value=min_progress, step=10, format="%d%%"
         )
-        if min_progress:
-            st.caption(f"이전 진행률이 {min_progress}%이므로 {min_progress}% ~ 90% 사이로 입력합니다.")
-        else:
-            st.caption("일시정지 진행률은 최대 90%입니다. 100%는 용접완료 버튼으로 등록하세요.")
     st.write("이 시각으로 일시정지를 등록하시겠습니까?")
     yes, no = yes_no()
     if yes:
@@ -843,11 +781,6 @@ def my_active_section(team: str, name: str):
         ids,
         index=None,
         format_func=lambda i: f"SPOOL {records[i]['SPOOL_NO']}  |  JOINT {records[i]['JOINT_NO']}",
-        captions=[
-            f"프로젝트 {records[i]['프로젝트번호']} · "
-            f"시작 {records[i]['용접시작일자']} {records[i]['용접시작시간']}"
-            for i in ids
-        ],
         key="f_record",
     )
     if rid is None:
@@ -890,8 +823,6 @@ def finish_page():
     if not can_manage_team() and not active_segments(user["team"], user["name"]):
         if notice := st.session_state.pop("finish_msg", None):
             st.session_state.start_notice = notice
-        else:
-            st.session_state.finish_access_denied = True
         st.switch_page(PAGES["start"])
 
     nav_bar("finish")
@@ -920,7 +851,6 @@ def finish_page():
     else:
         team, name = user["team"], user["name"]
         me = (team, name)
-        st.info(f"작업자: {team} · {name}")
         my_active_section(team, name)
 
     st.divider()
@@ -930,9 +860,6 @@ def finish_page():
         active_list_section(team_scope=user["team"])
     else:
         active_list_section(me)
-    if can_manage_team():
-        st.divider()
-        edit_active_joint_section("finish_active_edit")
 
 # ------------------------------------------------------- 용접목록 page ----
 def to_excel(df: pd.DataFrame) -> bytes:
@@ -1076,10 +1003,8 @@ def list_page():
             c1.text_input("직반", value=team, disabled=True)
             names = sorted(summary_df.loc[summary_df["직반"] == team, "작업자"].unique())
             name = c2.selectbox("이름", ["전체", *names], key=f"l_name_{team}")
-            st.caption(f"{team} 전체 기록을 조회할 수 있습니다.")
         else:
             team, name = user["team"], user["name"]
-            st.caption(f"내 기록만 조회할 수 있습니다: {team} · {name}")
         status = st.radio("상태", ["전체", ACTIVE, PAUSED, DONE, CANCELED], horizontal=True, key="l_status")
         valid_start = summary_start.dropna()
         first, last = (
@@ -1127,14 +1052,23 @@ def list_page():
 
     summary_columns = ["상태", "직반", "작업자", "프로젝트번호", "SPOOL_NO", "JOINT_NO", "누계 진행률(%)",
                        "JOINT 누적(분)", "용접시작일자", "용접시작시간", "용접완료일자", "용접완료시간"]
-    st.subheader("JOINT 현황 · JOINT당 한 행")
-    st.caption("SPOOL_NO와 JOINT_NO는 표에서 바로 수정할 수 있습니다. 삭제할 JOINT는 ‘삭제 선택’을 체크한 뒤 아래 삭제 버튼을 누르세요.")
+    st.subheader("용접현황")
     table_rows = shown_summary[["_doc_id", *summary_columns]].sort_values(
         ["SPOOL_NO", "JOINT_NO", "프로젝트번호"], kind="stable"
     ).reset_index(drop=True)
     table_rows.insert(1, "삭제 선택", False)
+
+    def status_row_style(row):
+        if row["상태"] == ACTIVE:
+            color = "#fff2cc"
+        elif row["상태"] == DONE:
+            color = "#d9ead3"
+        else:
+            color = ""
+        return [f"background-color: {color}" if color else "" for _ in row]
+
     edited_table = st.data_editor(
-        table_rows,
+        table_rows.style.apply(status_row_style, axis=1),
         hide_index=True,
         width="stretch",
         num_rows="fixed",
@@ -1143,9 +1077,9 @@ def list_page():
                   "JOINT 누적(분)", "용접시작일자", "용접시작시간", "용접완료일자", "용접완료시간"],
         column_config={
             "_doc_id": None,
-            "삭제 선택": st.column_config.CheckboxColumn("삭제 선택", help="삭제할 JOINT를 체크하세요."),
-            "SPOOL_NO": st.column_config.TextColumn("SPOOL_NO", help="대문자로 저장됩니다."),
-            "JOINT_NO": st.column_config.TextColumn("JOINT_NO", help="대문자로 저장됩니다."),
+            "삭제 선택": st.column_config.CheckboxColumn("삭제 선택"),
+            "SPOOL_NO": st.column_config.TextColumn("SPOOL_NO"),
+            "JOINT_NO": st.column_config.TextColumn("JOINT_NO"),
             "누계 진행률(%)": st.column_config.ProgressColumn("누계 진행률(%)", format="%d%%", min_value=0, max_value=100),
             "JOINT 누적(분)": st.column_config.NumberColumn("JOINT 누적(분)", format="%.1f"),
         },
@@ -1224,9 +1158,6 @@ def list_page():
 
     stamp = now().strftime("%Y%m%d_%H%M")
     st.subheader("다운로드")
-    st.caption(
-        f"최근 3일: {recent_start:%Y-%m-%d} ~ {today:%Y-%m-%d} · 용접시작일 기준 · 표 필터와 관계없이 다운로드"
-    )
     recent_filename = f"welding_last_3_days_{stamp}.xlsx"
     recent_data = to_excel(recent_export)
     all_filename = f"welding_all_data_{stamp}.xlsx"
@@ -1256,9 +1187,6 @@ def list_page():
         key="email_recipient",
         placeholder="name@example.com",
     ).strip()
-    email_settings = st.secrets.get("email", {})
-    if not email_settings.get("gmail_address") or not email_settings.get("gmail_app_password"):
-        st.caption("메일 발송을 사용하려면 Streamlit Secrets에 Gmail 주소와 Google App Password를 설정하세요.")
     with st.container(horizontal=True):
         send_recent = st.button("📧 최근 3일 Excel 보내기", width="stretch", key="send_recent_email")
         send_all = st.button("📧 전체 Excel 보내기", width="stretch", key="send_all_email")
@@ -1274,7 +1202,6 @@ def list_page():
                 st.error(str(exc))
             else:
                 st.success(f"{email_recipient} 주소로 Excel 파일을 보냈습니다.")
-    st.caption("휴대폰에서는 Excel 파일을 권장합니다. (한글이 깨지지 않음)")
 
 # ---------------------------------------------------------------- app ----
 if not st.session_state.get("current_user"):
