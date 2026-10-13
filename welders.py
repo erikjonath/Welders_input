@@ -382,8 +382,10 @@ def visible_joint_states() -> list[dict]:
     return [row for row in rows if row.get("직반") == user["team"]]
 
 def edit_active_joint_section(key: str):
-    active_rows = [row for row in visible_joint_states() if row.get("상태") == ACTIVE]
-    edit_joint_form(active_rows, key, "진행 중 JOINT 번호 수정")
+    editable_rows = [
+        row for row in visible_joint_states() if row.get("상태") in (ACTIVE, PAUSED)
+    ]
+    edit_joint_form(editable_rows, key, "진행 중 / 일시정지 JOINT 번호 수정")
 
 def delete_joint_records(doc_ids: list[str]):
     states = {row["_doc_id"]: row for row in visible_joint_states()}
@@ -422,16 +424,21 @@ def confirm_joint_delete(doc_ids: list[str], labels: dict[str, str]):
             st.error(str(exc))
         else:
             st.session_state.pop("delete_joint_pending", None)
+            st.session_state.reset_joint_status_editor = True
             st.session_state["delete_joint_msg"] = f"JOINT {len(doc_ids)}건과 연결된 이력을 삭제했습니다."
             st.rerun()
     if cancel:
         st.session_state.pop("delete_joint_pending", None)
+        st.session_state.reset_joint_status_editor = True
         st.rerun()
 
 # ---------------------------------------------------------------- shared ----
 def nav_bar(current: str):
     with st.container(horizontal=True, key="navbar"):
-        nav_items = [("start", "🔥 용접시작"), ("finish", "✅ 용접완료")]
+        user = current_user()
+        nav_items = [("start", "🔥 용접시작")]
+        if can_manage_team() or active_segments(user["team"], user["name"]):
+            nav_items.append(("finish", "✅ 용접완료"))
         if can_manage_team():
             nav_items.append(("list", "📋 용접목록"))
         for key, label in nav_items:
@@ -716,6 +723,10 @@ def paused_section(me: tuple[str, str] | None):
 
 def start_page():
     nav_bar("start")
+    if notice := st.session_state.pop("start_notice", None):
+        (st.success if notice[0] == "success" else st.error)(notice[1])
+    if st.session_state.pop("finish_access_denied", False):
+        st.info("진행 중인 JOINT가 없어 용접완료 페이지에 들어갈 수 없습니다. 일시정지 작업은 용접시작 페이지에서 다시 시작하세요.")
     if st.session_state.pop("start_reset", False):
         for key in list(st.session_state):
             if key in ("s_spool", "s_joint") or key.startswith("c_"):
@@ -880,6 +891,14 @@ def active_list_section(me: tuple[str, str] | None = None, team_scope: str | Non
     )
 
 def finish_page():
+    user = current_user()
+    if not can_manage_team() and not active_segments(user["team"], user["name"]):
+        if notice := st.session_state.pop("finish_msg", None):
+            st.session_state.start_notice = notice
+        else:
+            st.session_state.finish_access_denied = True
+        st.switch_page(PAGES["start"])
+
     nav_bar("finish")
     if msg := st.session_state.pop("finish_msg", None):
         (st.success if msg[0] == "success" else st.error)(msg[1])
@@ -891,7 +910,6 @@ def finish_page():
         ):
             st.switch_page(PAGES["start"])
 
-    user = current_user()
     if is_admin():
         team, name = pick_worker()
         me = (team, name) if name else None
@@ -974,6 +992,8 @@ def send_excel_email(recipient: str, filename: str, data: bytes):
 def list_page():
     if not can_manage_team():
         st.switch_page(PAGES["start"])
+    if st.session_state.pop("reset_joint_status_editor", False):
+        st.session_state.pop("joint_status_editor", None)
 
     nav_bar("list")
     if st.button("🔄 새로고침", key="l_refresh"):
@@ -1040,7 +1060,7 @@ def list_page():
         summary_df["용접시작일자"].astype(str), errors="coerce"
     )
 
-    with st.expander("필터", expanded=True):
+    with st.expander("필터", expanded=False):
         if is_admin():
             c1, c2 = st.columns(2)
             team = c1.selectbox("직반", ["전체", *WORKERS], key="l_team")
@@ -1106,20 +1126,62 @@ def list_page():
     summary_columns = ["상태", "직반", "작업자", "프로젝트번호", "SPOOL_NO", "JOINT_NO", "누계 진행률(%)",
                        "용접시작일자", "용접시작시간", "최근 일시정지일자", "최근 일시정지시간", "용접완료일자", "용접완료시간"]
     st.subheader("JOINT 현황 · JOINT당 한 행")
-    st.dataframe(
-        shown_summary[summary_columns].sort_values(["SPOOL_NO", "JOINT_NO", "프로젝트번호"], kind="stable"),
+    st.caption("SPOOL_NO와 JOINT_NO는 표에서 바로 수정할 수 있습니다. 삭제할 JOINT는 ‘삭제 선택’을 체크한 뒤 아래 삭제 버튼을 누르세요.")
+    table_rows = shown_summary[["_doc_id", *summary_columns]].sort_values(
+        ["SPOOL_NO", "JOINT_NO", "프로젝트번호"], kind="stable"
+    ).reset_index(drop=True)
+    table_rows.insert(1, "삭제 선택", False)
+    edited_table = st.data_editor(
+        table_rows,
         hide_index=True,
         width="stretch",
+        num_rows="fixed",
+        key="joint_status_editor",
+        disabled=["_doc_id", "상태", "직반", "작업자", "프로젝트번호", "누계 진행률(%)",
+                  "용접시작일자", "용접시작시간", "최근 일시정지일자", "최근 일시정지시간",
+                  "용접완료일자", "용접완료시간"],
         column_config={
+            "_doc_id": None,
+            "삭제 선택": st.column_config.CheckboxColumn("삭제 선택", help="삭제할 JOINT를 체크하세요."),
+            "SPOOL_NO": st.column_config.TextColumn("SPOOL_NO", help="대문자로 저장됩니다."),
+            "JOINT_NO": st.column_config.TextColumn("JOINT_NO", help="대문자로 저장됩니다."),
             "누계 진행률(%)": st.column_config.ProgressColumn("누계 진행률(%)", format="%d%%", min_value=0, max_value=100),
         },
     )
 
-    edit_joint_form(
-        [row for row in joint_states if row["_doc_id"] in set(shown_summary["_doc_id"])],
-        "list_joint_edit",
-        "SPOOL / JOINT 번호 수정",
-    )
+    if msg := st.session_state.pop("joint_table_msg", None):
+        st.success(msg)
+    if msg := st.session_state.pop("joint_table_error", None):
+        st.error(msg)
+
+    states_by_id = {row["_doc_id"]: row for row in joint_states}
+    if st.button("SPOOL / JOINT 수정 저장", type="primary", key="save_joint_table_edits"):
+        saved = 0
+        errors = []
+        for _, edited in edited_table.iterrows():
+            doc_id = edited["_doc_id"]
+            original = states_by_id.get(doc_id)
+            if not original:
+                errors.append("표의 JOINT 상태가 변경되었습니다. 새로고침 후 다시 시도하세요.")
+                continue
+            spool_value, joint_value = edited["SPOOL_NO"], edited["JOINT_NO"]
+            spool = "" if pd.isna(spool_value) else str(spool_value).strip().upper()
+            joint_no = "" if pd.isna(joint_value) else str(joint_value).strip().upper()
+            if spool == str(original.get("SPOOL_NO") or "").strip() and joint_no == str(original.get("JOINT_NO") or "").strip():
+                continue
+            try:
+                rename_joint(original, spool, joint_no)
+            except ValueError as exc:
+                errors.append(f"{joint_label(original)}: {exc}")
+            else:
+                saved += 1
+        st.session_state.reset_joint_status_editor = True
+        if saved:
+            st.session_state.joint_table_msg = f"{saved}건의 SPOOL / JOINT 번호를 수정하고 연결된 전체 이력에 반영했습니다."
+        if errors:
+            st.session_state.joint_table_error = "\n".join(errors)
+        st.rerun()
+
     labels = {
         row["_doc_id"]: (
             f"{row.get('프로젝트번호', '')} · {row.get('직반', '')} {row.get('작업자', '')} · "
@@ -1128,17 +1190,7 @@ def list_page():
         )
         for row in joint_states
     }
-    selectable_ids = shown_summary["_doc_id"].tolist()
-    if "delete_joint_selected" in st.session_state:
-        st.session_state.delete_joint_selected = [
-            value for value in st.session_state.delete_joint_selected if value in selectable_ids
-        ]
-    selected_delete_ids = st.multiselect(
-        "삭제할 JOINT 여러 개 선택",
-        selectable_ids,
-        format_func=lambda doc_id: labels[doc_id],
-        key="delete_joint_selected",
-    )
+    selected_delete_ids = edited_table.loc[edited_table["삭제 선택"], "_doc_id"].tolist()
     if st.button("🗑️ 선택한 JOINT와 전체 이력 삭제", disabled=not selected_delete_ids, type="secondary"):
         st.session_state.delete_joint_pending = list(selected_delete_ids)
         st.rerun()
