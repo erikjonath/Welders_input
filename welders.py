@@ -174,7 +174,7 @@ def log_ref(seg_id: int):
     return get_db().collection("welding_log").document(str(seg_id))
 
 def clear_cache():
-    for fn in (latest_by_joint, paused_joints, _active_all, load_log):
+    for fn in (latest_by_joint, paused_joints, _active_all, load_log, load_joint_states):
         fn.clear()
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
@@ -217,6 +217,13 @@ def load_log() -> pd.DataFrame:
     df["진행률"] = pd.to_numeric(df["진행률"])
     return df
 
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def load_joint_states() -> list[dict]:
+    return [
+        {"_doc_id": snapshot.id, **snapshot.to_dict()}
+        for snapshot in get_db().collection("joints").stream()
+    ]
+
 @firestore.transactional
 def _start_tx(tx, jref, lref, seg: dict):
     snap = jref.get(transaction=tx)
@@ -242,6 +249,184 @@ def _cancel_tx(tx, jref, lref, seg_id: int):
         raise JointTaken
     tx.update(lref, {"상태": CANCELED})
     tx.update(jref, {"상태": CANCELED, "base_progress": 0})
+
+@firestore.transactional
+def _rename_joint_tx(tx, old_ref, new_ref, log_refs, old_key, expected_state_id, updates):
+    current_snap = old_ref.get(transaction=tx)
+    target_snap = new_ref.get(transaction=tx) if old_ref.id != new_ref.id else current_snap
+    log_snaps = [ref.get(transaction=tx) for ref in log_refs]
+    current = current_snap.to_dict() if current_snap.exists else None
+    if (
+        not current
+        or tuple(str(current.get(c) or "") for c in JOINT_COLS) != old_key
+        or current.get("id") != expected_state_id
+    ):
+        raise JointTaken("이 JOINT 정보가 다른 작업에서 변경되었습니다. 새로고침 후 다시 시도하세요.")
+    if old_ref.id != new_ref.id and target_snap.exists:
+        raise JointTaken("수정하려는 SPOOL/JOINT 번호가 이미 등록되어 있습니다.")
+    for snap in log_snaps:
+        row = snap.to_dict() if snap.exists else None
+        if not row or tuple(str(row.get(c) or "") for c in JOINT_COLS) != old_key:
+            raise JointTaken("작업 이력이 변경되었습니다. 새로고침 후 다시 시도하세요.")
+
+    if old_ref.id == new_ref.id:
+        tx.update(old_ref, updates)
+    else:
+        tx.set(new_ref, {**current, **updates})
+        tx.delete(old_ref)
+    for ref in log_refs:
+        tx.update(ref, updates)
+
+@firestore.transactional
+def _delete_joint_tx(tx, state_items, log_items):
+    state_snaps = [
+        (ref, expected_key, expected_id, ref.get(transaction=tx))
+        for ref, expected_key, expected_id in state_items
+    ]
+    log_snaps = [(ref, expected_key, ref.get(transaction=tx)) for ref, expected_key in log_items]
+    for _, expected_key, expected_id, snap in state_snaps:
+        row = snap.to_dict() if snap.exists else None
+        if (
+            not row
+            or tuple(str(row.get(c) or "") for c in JOINT_COLS) != expected_key
+            or row.get("id") != expected_id
+        ):
+            raise JointTaken("선택한 데이터가 변경되어 삭제하지 않았습니다. 새로고침 후 다시 선택하세요.")
+    for _, expected_key, snap in log_snaps:
+        row = snap.to_dict() if snap.exists else None
+        if not row or tuple(str(row.get(c) or "") for c in JOINT_COLS) != expected_key:
+            raise JointTaken("선택한 데이터가 변경되어 삭제하지 않았습니다. 새로고침 후 다시 선택하세요.")
+    for ref, _, _ in log_snaps:
+        tx.delete(ref)
+    for ref, _, _, _ in state_snaps:
+        tx.delete(ref)
+
+def joint_key(rec: dict) -> tuple[str, str, str, str]:
+    return tuple(str(rec.get(c) or "") for c in JOINT_COLS)
+
+def joint_log_refs(rec: dict, refresh: bool = False) -> list:
+    if refresh:
+        load_log.clear()
+    df = load_log()
+    if df.empty:
+        return []
+    mask = pd.Series(True, index=df.index)
+    for column in JOINT_COLS:
+        mask &= df[column].fillna("").astype(str) == str(rec.get(column) or "")
+    return [log_ref(int(value)) for value in df.loc[mask, "id"].tolist()]
+
+def rename_joint(rec: dict, spool: str, joint: str):
+    if not can_manage_team() or not can_access_record(rec["직반"], rec["작업자"]):
+        raise ValueError("이 JOINT를 수정할 권한이 없습니다.")
+    spool, joint = spool.strip().upper(), joint.strip().upper()
+    if not spool or not joint:
+        raise ValueError("SPOOL NO와 JOINT NO를 모두 입력하세요.")
+    updates = {"SPOOL_NO": spool, "JOINT_NO": joint}
+    updated = {**rec, **updates}
+    old_ref = get_db().collection("joints").document(rec["_doc_id"])
+    new_ref = joint_ref(updated)
+    if old_ref.id == new_ref.id and joint_key(rec) == joint_key(updated):
+        return
+    logs = joint_log_refs(rec, refresh=True)
+    if len(logs) + (1 if old_ref.id == new_ref.id else 2) > 500:
+        raise ValueError("이 JOINT의 이력이 너무 많아 한 번에 수정할 수 없습니다. 관리자에게 문의하세요.")
+    try:
+        _rename_joint_tx(
+            get_db().transaction(), old_ref, new_ref, logs, joint_key(rec), rec.get("id"), updates
+        )
+    except JointTaken as exc:
+        raise ValueError(str(exc)) from exc
+    clear_cache()
+
+def edit_joint_form(rows: list[dict], key: str, title: str):
+    st.subheader(title)
+    if not rows:
+        st.caption("수정할 수 있는 JOINT가 없습니다.")
+        return
+    records = {row["_doc_id"]: row for row in rows}
+    labels = {
+        doc_id: (
+            f"{row.get('프로젝트번호', '')} · {row.get('직반', '')} {row.get('작업자', '')} · "
+            f"SPOOL {row.get('SPOOL_NO', '')} / JOINT {row.get('JOINT_NO', '')}"
+        )
+        for doc_id, row in records.items()
+    }
+    if msg := st.session_state.pop(f"{key}_msg", None):
+        st.success(msg)
+    selected_id = st.selectbox(
+        "수정할 JOINT 선택",
+        list(records),
+        format_func=lambda doc_id: labels[doc_id],
+        key=f"{key}_selected",
+    )
+    rec = records[selected_id]
+    with st.form(f"{key}_form_{selected_id}"):
+        c1, c2 = st.columns(2)
+        spool = c1.text_input("SPOOL NO", value=rec["SPOOL_NO"], key=f"{key}_{selected_id}_spool")
+        joint = c2.text_input("JOINT NO", value=rec["JOINT_NO"], key=f"{key}_{selected_id}_joint")
+        submitted = st.form_submit_button("SPOOL / JOINT 수정", type="primary", width="stretch")
+    if submitted:
+        try:
+            rename_joint(rec, spool, joint)
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            st.session_state[f"{key}_msg"] = "SPOOL NO / JOINT NO를 수정했습니다. 연결된 전체 이력에도 반영했습니다."
+            st.rerun()
+
+def visible_joint_states() -> list[dict]:
+    rows = load_joint_states()
+    user = current_user()
+    if is_admin():
+        return rows
+    return [row for row in rows if row.get("직반") == user["team"]]
+
+def edit_active_joint_section(key: str):
+    active_rows = [row for row in visible_joint_states() if row.get("상태") == ACTIVE]
+    edit_joint_form(active_rows, key, "진행 중 JOINT 번호 수정")
+
+def delete_joint_records(doc_ids: list[str]):
+    states = {row["_doc_id"]: row for row in visible_joint_states()}
+    selected = [states[doc_id] for doc_id in doc_ids if doc_id in states]
+    if len(selected) != len(set(doc_ids)):
+        raise ValueError("선택한 JOINT 중 일부에 접근할 수 없습니다. 새로고침 후 다시 선택하세요.")
+    state_items = []
+    log_items_by_id = {}
+    load_log.clear()
+    for rec in selected:
+        if not can_access_record(rec["직반"], rec["작업자"]):
+            raise ValueError("선택한 JOINT를 삭제할 권한이 없습니다.")
+        key = joint_key(rec)
+        state_items.append((get_db().collection("joints").document(rec["_doc_id"]), key, rec.get("id")))
+        for ref in joint_log_refs(rec):
+            log_items_by_id[ref.id] = (ref, key)
+    log_items = list(log_items_by_id.values())
+    if len(state_items) + len(log_items) > 500:
+        raise ValueError("선택한 이력이 많아 한 번에 삭제할 수 없습니다. 더 적은 수를 선택하세요.")
+    try:
+        _delete_joint_tx(get_db().transaction(), state_items, log_items)
+    except JointTaken as exc:
+        raise ValueError(str(exc)) from exc
+    clear_cache()
+
+@st.dialog("선택한 JOINT 데이터 삭제")
+def confirm_joint_delete(doc_ids: list[str], labels: dict[str, str]):
+    st.warning("선택한 JOINT의 현재 상태와 연결된 모든 작업 이력이 영구 삭제됩니다. 이 작업은 되돌릴 수 없습니다.")
+    for doc_id in doc_ids:
+        st.write(f"• {labels.get(doc_id, doc_id)}")
+    confirm, cancel = yes_no()
+    if confirm:
+        try:
+            delete_joint_records(doc_ids)
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            st.session_state.pop("delete_joint_pending", None)
+            st.session_state["delete_joint_msg"] = f"JOINT {len(doc_ids)}건과 연결된 이력을 삭제했습니다."
+            st.rerun()
+    if cancel:
+        st.session_state.pop("delete_joint_pending", None)
+        st.rerun()
 
 # ---------------------------------------------------------------- shared ----
 def nav_bar(current: str):
@@ -567,9 +752,18 @@ def start_page():
 
     st.divider()
     paused_section(me)
+    if can_manage_team():
+        st.divider()
+        edit_active_joint_section("start_active_edit")
 
 # ------------------------------------------------------- 용접완료 page ----
 def end_segment(rec: dict, ts: datetime, status: str, progress: int):
+    if status == PAUSED and progress > 90:
+        st.session_state.finish_msg = (
+            "error",
+            "일시정지 진행률은 최대 90%입니다. 100% 완료는 용접완료 버튼으로 등록하세요.",
+        )
+        return
     date, time = fmt(ts)
     date_col, time_col = ("일시정지일자", "일시정지시간") if status == PAUSED else ("용접완료일자", "용접완료시간")
     changes = {"상태": status, "진행률": progress, date_col: date, time_col: time}
@@ -607,15 +801,20 @@ def pause_dialog(rec: dict, min_progress: int, ts: datetime):
     show_record(rec, {"용접시작": f"{rec['용접시작일자']} {rec['용접시작시간']}"})
     date, time = fmt(ts)
     st.markdown(f"### {date} {time}")
-    if min_progress >= 100:
-        st.warning("진행률이 이미 100%입니다. 용접완료를 등록하세요.")
-        progress = 100
+    if min_progress > 90:
+        st.warning("현재 저장된 진행률이 90%를 초과합니다. 추가 일시정지 대신 용접완료를 등록하세요.")
+        return
+    elif min_progress == 90:
+        progress = 90
+        st.info("일시정지는 최대 90%까지입니다. 100%는 용접완료 버튼으로 등록하세요.")
     else:
         progress = st.slider(
-            "진행률", min_value=min_progress, max_value=100, value=min_progress, step=10, format="%d%%"
+            "진행률", min_value=min_progress, max_value=90, value=min_progress, step=10, format="%d%%"
         )
         if min_progress:
-            st.caption(f"이전 진행률이 {min_progress}%이므로 {min_progress}% ~ 100% 사이로 입력합니다.")
+            st.caption(f"이전 진행률이 {min_progress}%이므로 {min_progress}% ~ 90% 사이로 입력합니다.")
+        else:
+            st.caption("일시정지 진행률은 최대 90%입니다. 100%는 용접완료 버튼으로 등록하세요.")
     st.write("이 시각으로 일시정지를 등록하시겠습니까?")
     yes, no = yes_no()
     if yes:
@@ -684,6 +883,13 @@ def finish_page():
     nav_bar("finish")
     if msg := st.session_state.pop("finish_msg", None):
         (st.success if msg[0] == "success" else st.error)(msg[1])
+        if msg[0] == "success":
+            st.page_link(
+                PAGES["start"],
+                label="🔥 용접시작으로 돌아가기",
+                type="primary",
+                width="stretch",
+            )
 
     user = current_user()
     if is_admin():
@@ -711,6 +917,9 @@ def finish_page():
         active_list_section(team_scope=user["team"])
     else:
         active_list_section(me)
+    if can_manage_team():
+        st.divider()
+        edit_active_joint_section("finish_active_edit")
 
 # ------------------------------------------------------- 용접목록 page ----
 def to_excel(df: pd.DataFrame) -> bytes:
@@ -802,23 +1011,59 @@ def list_page():
     start, is_latest = start[::-1], is_latest[::-1]
     df = df.iloc[::-1]  
 
+    joint_states = visible_joint_states()
+    summary_rows = []
+    for row in joint_states:
+        state = row.get("상태", "")
+        progress = 100 if state == DONE else int(row.get("base_progress") or 0)
+        summary_rows.append({
+            "_doc_id": row["_doc_id"],
+            "상태": state,
+            "직반": row.get("직반", ""),
+            "작업자": row.get("작업자", ""),
+            "프로젝트번호": row.get("프로젝트번호", ""),
+            "SPOOL_NO": row.get("SPOOL_NO", ""),
+            "JOINT_NO": row.get("JOINT_NO", ""),
+            "누계 진행률(%)": progress,
+            "용접시작일자": row.get("용접시작일자") or "",
+            "용접시작시간": row.get("용접시작시간") or "",
+            "최근 일시정지일자": row.get("일시정지일자") or "",
+            "최근 일시정지시간": row.get("일시정지시간") or "",
+            "용접완료일자": row.get("용접완료일자") or "",
+            "용접완료시간": row.get("용접완료시간") or "",
+        })
+    summary_df = pd.DataFrame(summary_rows)
+    if summary_df.empty:
+        st.info("JOINT 상태 데이터가 없습니다.")
+        return
+    summary_start = pd.to_datetime(
+        summary_df["용접시작일자"].astype(str), errors="coerce"
+    )
+
     with st.expander("필터", expanded=True):
         if is_admin():
             c1, c2 = st.columns(2)
             team = c1.selectbox("직반", ["전체", *WORKERS], key="l_team")
-            names = sorted(df["작업자"].unique()) if team == "전체" else WORKERS[team]
+            names = sorted(summary_df["작업자"].unique()) if team == "전체" else sorted(
+                summary_df.loc[summary_df["직반"] == team, "작업자"].unique()
+            )
             name = c2.selectbox("이름", ["전체", *names], key=f"l_name_{team}")
         elif is_team_admin():
             team = user["team"]
             c1, c2 = st.columns(2)
             c1.text_input("직반", value=team, disabled=True)
-            name = c2.selectbox("이름", ["전체", *WORKERS[team]], key=f"l_name_{team}")
+            names = sorted(summary_df.loc[summary_df["직반"] == team, "작업자"].unique())
+            name = c2.selectbox("이름", ["전체", *names], key=f"l_name_{team}")
             st.caption(f"{team} 전체 기록을 조회할 수 있습니다.")
         else:
             team, name = user["team"], user["name"]
             st.caption(f"내 기록만 조회할 수 있습니다: {team} · {name}")
         status = st.radio("상태", ["전체", ACTIVE, PAUSED, DONE, CANCELED], horizontal=True, key="l_status")
-        first, last = start.min().date(), start.max().date()
+        valid_start = summary_start.dropna()
+        first, last = (
+            (valid_start.min().date(), valid_start.max().date())
+            if not valid_start.empty else (start.min().date(), start.max().date())
+        )
         period = st.date_input("용접시작일자 기간", (first, last), key="l_period")
         search = st.text_input("SPOOL / JOINT 검색", key="l_search").strip().lower()
 
@@ -835,32 +1080,93 @@ def list_page():
         mask &= df[["SPOOL_NO", "JOINT_NO"]].apply(
             lambda c: c.str.lower().str.contains(search, regex=False)
         ).any(axis=1)
-    shown = df[mask]
+    history_shown = df[mask]
+
+    summary_mask = pd.Series(True, index=summary_df.index)
+    if team != "전체":
+        summary_mask &= summary_df["직반"] == team
+    if name != "전체":
+        summary_mask &= summary_df["작업자"] == name
+    if status != "전체":
+        summary_mask &= summary_df["상태"] == status
+    if isinstance(period, tuple) and len(period) == 2:
+        summary_mask &= summary_start.dt.date.between(period[0], period[1])
+    if search:
+        summary_mask &= summary_df[["SPOOL_NO", "JOINT_NO"]].apply(
+            lambda column: column.astype(str).str.lower().str.contains(search, regex=False)
+        ).any(axis=1)
+    shown_summary = summary_df[summary_mask].copy()
 
     with st.container(horizontal=True):
-        st.metric("기록", f"{len(shown):,}")
-        st.metric("진행중", f"{(shown['상태'] == ACTIVE).sum():,}")
-        st.metric("일시정지", f"{((shown['상태'] == PAUSED) & is_latest[mask]).sum():,}", help="현재 일시정지 상태인 JOINT")
-        st.metric("완료", f"{(shown['상태'] == DONE).sum():,}")
+        st.metric("JOINT", f"{len(shown_summary):,}")
+        st.metric("진행중", f"{(shown_summary['상태'] == ACTIVE).sum():,}")
+        st.metric("일시정지", f"{(shown_summary['상태'] == PAUSED).sum():,}")
+        st.metric("완료", f"{(shown_summary['상태'] == DONE).sum():,}")
 
-    columns = ["상태", "직반", "작업자", "프로젝트번호", "SPOOL_NO", "JOINT_NO", "누계 진행률(%)", "당일 진행률(%)",
-               "용접시작일자", "용접시작시간", "일시정지일자", "일시정지시간", "용접완료일자", "용접완료시간",
-               "소요시간(분)", "JOINT 누적(분)"]
-    export = shown[columns]
+    summary_columns = ["상태", "직반", "작업자", "프로젝트번호", "SPOOL_NO", "JOINT_NO", "누계 진행률(%)",
+                       "용접시작일자", "용접시작시간", "최근 일시정지일자", "최근 일시정지시간", "용접완료일자", "용접완료시간"]
+    st.subheader("JOINT 현황 · JOINT당 한 행")
     st.dataframe(
-        export,
+        shown_summary[summary_columns].sort_values(["SPOOL_NO", "JOINT_NO", "프로젝트번호"], kind="stable"),
         hide_index=True,
         width="stretch",
         column_config={
-            "누계 진행률(%)": st.column_config.NumberColumn(format="%d%%"),
-            "당일 진행률(%)": st.column_config.NumberColumn(format="%d%%"),
+            "누계 진행률(%)": st.column_config.ProgressColumn("누계 진행률(%)", format="%d%%", min_value=0, max_value=100),
         },
     )
 
+    edit_joint_form(
+        [row for row in joint_states if row["_doc_id"] in set(shown_summary["_doc_id"])],
+        "list_joint_edit",
+        "SPOOL / JOINT 번호 수정",
+    )
+    labels = {
+        row["_doc_id"]: (
+            f"{row.get('프로젝트번호', '')} · {row.get('직반', '')} {row.get('작업자', '')} · "
+            f"SPOOL {row.get('SPOOL_NO', '')} / JOINT {row.get('JOINT_NO', '')} · "
+            f"{row.get('상태', '')} · {100 if row.get('상태') == DONE else row.get('base_progress', 0) or 0}%"
+        )
+        for row in joint_states
+    }
+    selectable_ids = shown_summary["_doc_id"].tolist()
+    if "delete_joint_selected" in st.session_state:
+        st.session_state.delete_joint_selected = [
+            value for value in st.session_state.delete_joint_selected if value in selectable_ids
+        ]
+    selected_delete_ids = st.multiselect(
+        "삭제할 JOINT 여러 개 선택",
+        selectable_ids,
+        format_func=lambda doc_id: labels[doc_id],
+        key="delete_joint_selected",
+    )
+    if st.button("🗑️ 선택한 JOINT와 전체 이력 삭제", disabled=not selected_delete_ids, type="secondary"):
+        st.session_state.delete_joint_pending = list(selected_delete_ids)
+        st.rerun()
+    if msg := st.session_state.pop("delete_joint_msg", None):
+        st.success(msg)
+    if pending := st.session_state.get("delete_joint_pending"):
+        confirm_joint_delete(pending, labels)
+
+    with st.expander("작업 이력 상세 · 진행률 입력 기록"):
+        st.dataframe(
+            history_shown[["상태", "직반", "작업자", "프로젝트번호", "SPOOL_NO", "JOINT_NO", "누계 진행률(%)", "당일 진행률(%)",
+                           "용접시작일자", "용접시작시간", "일시정지일자", "일시정지시간", "용접완료일자", "용접완료시간",
+                           "소요시간(분)", "JOINT 누적(분)"]],
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "누계 진행률(%)": st.column_config.NumberColumn(format="%d%%"),
+                "당일 진행률(%)": st.column_config.NumberColumn(format="%d%%"),
+            },
+        )
+
     today = now().date()
     recent_start = today - timedelta(days=2)
-    recent_export = df.loc[start.dt.date.between(recent_start, today), columns]
-    all_export = df[columns]
+    log_export_columns = ["상태", "직반", "작업자", "프로젝트번호", "SPOOL_NO", "JOINT_NO", "누계 진행률(%)", "당일 진행률(%)",
+                          "용접시작일자", "용접시작시간", "일시정지일자", "일시정지시간", "용접완료일자", "용접완료시간",
+                          "소요시간(분)", "JOINT 누적(분)"]
+    recent_export = df.loc[start.dt.date.between(recent_start, today), log_export_columns]
+    all_export = df[log_export_columns]
 
     stamp = now().strftime("%Y%m%d_%H%M")
     st.subheader("다운로드")
