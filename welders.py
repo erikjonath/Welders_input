@@ -102,14 +102,9 @@ def login_page():
     if not configured_admin_password():
         st.warning("관리자 로그인을 사용하려면 Streamlit Secrets에 [auth] admin_password를 설정하세요.")
 
-    show_password = st.checkbox("비밀번호 표시", key="login_show_password")
     with st.form("login_form", clear_on_submit=True):
         login_id = st.text_input("ID", key="login_id")
-        password = st.text_input(
-            "비밀번호",
-            type="default" if show_password else "password",
-            key="login_password",
-        )
+        password = st.text_input("비밀번호", type="password", key="login_password")
         submitted = st.form_submit_button("로그인", type="primary", width="stretch")
 
     if submitted:
@@ -1025,6 +1020,12 @@ def list_page():
     df["_cycle"] = cancelled.groupby([df[c] for c in JOINT_COLS]).cumsum() - cancelled
     cycle = df.groupby([*JOINT_COLS, "_cycle"])
     df["JOINT 누적(분)"] = cycle["소요시간(분)"].transform(lambda s: s.sum(min_count=1)).round(1)
+    joint_minutes = (
+        df.sort_values("id")
+        .groupby(list(JOINT_COLS), dropna=False)["JOINT 누적(분)"]
+        .last()
+        .to_dict()
+    )
     df["누계 진행률(%)"] = df["진행률"].astype("Int64")
     df["당일 진행률(%)"] = (df["진행률"] - cycle["진행률"].shift().fillna(0)).astype("Int64")
     is_latest = df["id"] == joint["id"].transform("max")
@@ -1045,10 +1046,11 @@ def list_page():
             "SPOOL_NO": row.get("SPOOL_NO", ""),
             "JOINT_NO": row.get("JOINT_NO", ""),
             "누계 진행률(%)": progress,
+            "JOINT 누적(분)": joint_minutes.get(
+                tuple(row.get(column) for column in JOINT_COLS), 0
+            ),
             "용접시작일자": row.get("용접시작일자") or "",
             "용접시작시간": row.get("용접시작시간") or "",
-            "최근 일시정지일자": row.get("일시정지일자") or "",
-            "최근 일시정지시간": row.get("일시정지시간") or "",
             "용접완료일자": row.get("용접완료일자") or "",
             "용접완료시간": row.get("용접완료시간") or "",
         })
@@ -1124,7 +1126,7 @@ def list_page():
         st.metric("완료", f"{(shown_summary['상태'] == DONE).sum():,}")
 
     summary_columns = ["상태", "직반", "작업자", "프로젝트번호", "SPOOL_NO", "JOINT_NO", "누계 진행률(%)",
-                       "용접시작일자", "용접시작시간", "최근 일시정지일자", "최근 일시정지시간", "용접완료일자", "용접완료시간"]
+                       "JOINT 누적(분)", "용접시작일자", "용접시작시간", "용접완료일자", "용접완료시간"]
     st.subheader("JOINT 현황 · JOINT당 한 행")
     st.caption("SPOOL_NO와 JOINT_NO는 표에서 바로 수정할 수 있습니다. 삭제할 JOINT는 ‘삭제 선택’을 체크한 뒤 아래 삭제 버튼을 누르세요.")
     table_rows = shown_summary[["_doc_id", *summary_columns]].sort_values(
@@ -1138,14 +1140,14 @@ def list_page():
         num_rows="fixed",
         key="joint_status_editor",
         disabled=["_doc_id", "상태", "직반", "작업자", "프로젝트번호", "누계 진행률(%)",
-                  "용접시작일자", "용접시작시간", "최근 일시정지일자", "최근 일시정지시간",
-                  "용접완료일자", "용접완료시간"],
+                  "JOINT 누적(분)", "용접시작일자", "용접시작시간", "용접완료일자", "용접완료시간"],
         column_config={
             "_doc_id": None,
             "삭제 선택": st.column_config.CheckboxColumn("삭제 선택", help="삭제할 JOINT를 체크하세요."),
             "SPOOL_NO": st.column_config.TextColumn("SPOOL_NO", help="대문자로 저장됩니다."),
             "JOINT_NO": st.column_config.TextColumn("JOINT_NO", help="대문자로 저장됩니다."),
             "누계 진행률(%)": st.column_config.ProgressColumn("누계 진행률(%)", format="%d%%", min_value=0, max_value=100),
+            "JOINT 누적(분)": st.column_config.NumberColumn("JOINT 누적(분)", format="%.1f"),
         },
     )
 
