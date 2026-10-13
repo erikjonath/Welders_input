@@ -883,13 +883,13 @@ def finish_page():
     nav_bar("finish")
     if msg := st.session_state.pop("finish_msg", None):
         (st.success if msg[0] == "success" else st.error)(msg[1])
-        if msg[0] == "success":
-            st.page_link(
-                PAGES["start"],
-                label="🔥 용접시작으로 돌아가기",
-                type="primary",
-                width="stretch",
-            )
+        if msg[0] == "success" and st.button(
+            "🔥 용접시작으로 돌아가기",
+            type="primary",
+            width="stretch",
+            key="return_to_start_after_finish",
+        ):
+            st.switch_page(PAGES["start"])
 
     user = current_user()
     if is_admin():
