@@ -1074,27 +1074,33 @@ def list_page():
             color = ""
         return [f"background-color: {color}" if color else ""]
 
-    edited_table = st.data_editor(
-        table_rows.style.apply(status_row_style, axis=1, subset=["상태"]),
-        hide_index=True,
-        width="stretch",
-        height=750,
-        num_rows="fixed",
-        key="joint_status_editor",
-        disabled=["_doc_id", "상태", "직반", "작업자", "프로젝트번호", "누계 진행률(%)",
-                  "JOINT 누적(분)", "용접시작일자", "용접시작시간", "용접완료일자", "용접완료시간"],
-        column_config={
-            "_doc_id": None,
-            "프로젝트번호": "프로젝트",
-            "SPOOL_NO": "SPOOL NO",
-            "JOINT_NO": "JOINT NO",
-            "삭제 선택": st.column_config.CheckboxColumn("삭제 선택"),
-            "SPOOL_NO": st.column_config.TextColumn("SPOOL_NO"),
-            "JOINT_NO": st.column_config.TextColumn("JOINT_NO"),
-            "누계 진행률(%)": st.column_config.ProgressColumn("누계 진행률(%)", format="%d%%", min_value=0, max_value=100),
-            "JOINT 누적(분)": st.column_config.NumberColumn("JOINT 누적(분)", format="%.1f"),
-        },
-    )
+    if table_rows.empty:
+        edited_table = table_rows.copy()
+    else:
+        # Recompute after filters/reruns: fit the visible rows, up to about 20.
+        editor_height = min(750, 65 + 35 * min(len(table_rows), 20))
+        edited_table = st.data_editor(
+            table_rows.style.apply(status_row_style, axis=1, subset=["상태"]),
+            hide_index=True,
+            width="stretch",
+            height=editor_height,
+            row_height=35,
+            num_rows="fixed",
+            key="joint_status_editor",
+            disabled=["_doc_id", "상태", "직반", "작업자", "프로젝트번호", "누계 진행률(%)",
+                      "JOINT 누적(분)", "용접시작일자", "용접시작시간", "용접완료일자", "용접완료시간"],
+            column_config={
+                "_doc_id": None,
+                "프로젝트번호": "프로젝트",
+                "SPOOL_NO": "SPOOL NO",
+                "JOINT_NO": "JOINT NO",
+                "삭제 선택": st.column_config.CheckboxColumn("삭제 선택"),
+                "SPOOL_NO": st.column_config.TextColumn("SPOOL_NO"),
+                "JOINT_NO": st.column_config.TextColumn("JOINT_NO"),
+                "누계 진행률(%)": st.column_config.ProgressColumn("누계 진행률(%)", format="%d%%", min_value=0, max_value=100),
+                "JOINT 누적(분)": st.column_config.NumberColumn("JOINT 누적(분)", format="%.1f"),
+            },
+        )
 
     if msg := st.session_state.pop("joint_table_msg", None):
         st.success(msg)
