@@ -865,8 +865,8 @@ def finish_page():
 def to_excel(df: pd.DataFrame) -> bytes:
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="용접목록")
-        sheet = writer.sheets["용접목록"]
+        df.to_excel(writer, index=False, sheet_name="용접현황")
+        sheet = writer.sheets["용접현황"]
         for col_cells in sheet.columns:
             width = max(len(str(c.value)) if c.value is not None else 0 for c in col_cells)
             sheet.column_dimensions[col_cells[0].column_letter].width = min(max(width * 1.3 + 2, 8), 40)
@@ -941,8 +941,6 @@ def list_page():
     end_time = df["용접완료시간"].fillna(df["일시정지시간"])
     end = pd.to_datetime(end_date.str.cat(end_time, sep=" "))
     df["소요시간(분)"] = ((end - start).dt.total_seconds() / 60).round(1)
-    joint = df.groupby(list(JOINT_COLS))
-    
     cancelled = df["상태"] == CANCELED
     df["_cycle"] = cancelled.groupby([df[c] for c in JOINT_COLS]).cumsum() - cancelled
     cycle = df.groupby([*JOINT_COLS, "_cycle"])
@@ -955,9 +953,9 @@ def list_page():
     )
     df["누계 진행률(%)"] = df["진행률"].astype("Int64")
     df["당일 진행률(%)"] = (df["진행률"] - cycle["진행률"].shift().fillna(0)).astype("Int64")
-    is_latest = df["id"] == joint["id"].transform("max")
-    start, is_latest = start[::-1], is_latest[::-1]
-    df = df.iloc[::-1]  
+    df["_sort_start"] = start
+    df = df.sort_values(["_sort_start", "id"], ascending=[False, False], kind="stable")
+    start = df["_sort_start"]
 
     joint_states = visible_joint_states()
     summary_rows = []
@@ -986,8 +984,11 @@ def list_page():
         st.info("JOINT 상태 데이터가 없습니다.")
         return
     summary_start = pd.to_datetime(
-        summary_df["용접시작일자"].astype(str), errors="coerce"
+        summary_df["용접시작일자"].astype(str) + " " + summary_df["용접시작시간"].astype(str),
+        errors="coerce",
     )
+    today = now().date()
+    recent_start = today - timedelta(days=2)
 
     with st.expander("필터", expanded=False):
         if is_admin():
@@ -1011,7 +1012,8 @@ def list_page():
             (valid_start.min().date(), valid_start.max().date())
             if not valid_start.empty else (start.min().date(), start.max().date())
         )
-        period = st.date_input("용접시작일자 기간", (first, last), key="l_period")
+        default_period = (recent_start, today) if is_team_admin() else (first, last)
+        period = st.date_input("용접시작일자 기간", default_period, key="l_period")
         search = st.text_input("SPOOL / JOINT 검색", key="l_search").strip().lower()
 
     mask = pd.Series(True, index=df.index)
@@ -1037,12 +1039,19 @@ def list_page():
     if status != "전체":
         summary_mask &= summary_df["상태"] == status
     if isinstance(period, tuple) and len(period) == 2:
-        summary_mask &= summary_start.dt.date.between(period[0], period[1])
+        date_mask = summary_start.dt.date.between(period[0], period[1])
+        if is_team_admin() and period == default_period:
+            date_mask |= summary_df["상태"].isin([ACTIVE, PAUSED])
+        summary_mask &= date_mask
     if search:
         summary_mask &= summary_df[["SPOOL_NO", "JOINT_NO"]].apply(
             lambda column: column.astype(str).str.lower().str.contains(search, regex=False)
         ).any(axis=1)
     shown_summary = summary_df[summary_mask].copy()
+    shown_summary["_sort_start"] = summary_start.loc[shown_summary.index]
+    shown_summary = shown_summary.sort_values("_sort_start", ascending=False, kind="stable").drop(
+        columns="_sort_start"
+    )
 
     with st.container(horizontal=True):
         st.metric("JOINT", f"{len(shown_summary):,}")
@@ -1050,13 +1059,11 @@ def list_page():
         st.metric("일시정지", f"{(shown_summary['상태'] == PAUSED).sum():,}")
         st.metric("완료", f"{(shown_summary['상태'] == DONE).sum():,}")
 
-    summary_columns = ["상태", "직반", "작업자", "프로젝트번호", "SPOOL_NO", "JOINT_NO", "누계 진행률(%)",
-                       "JOINT 누적(분)", "용접시작일자", "용접시작시간", "용접완료일자", "용접완료시간"]
+    summary_columns = ["상태", "작업자", "프로젝트번호", "SPOOL_NO", "JOINT_NO", "누계 진행률(%)",
+                       "JOINT 누적(분)", "직반", "용접시작일자", "용접시작시간", "용접완료일자", "용접완료시간"]
     st.subheader("용접현황")
-    table_rows = shown_summary[["_doc_id", *summary_columns]].sort_values(
-        ["SPOOL_NO", "JOINT_NO", "프로젝트번호"], kind="stable"
-    ).reset_index(drop=True)
-    table_rows.insert(1, "삭제 선택", False)
+    table_rows = shown_summary[["_doc_id", *summary_columns]].copy().reset_index(drop=True)
+    table_rows["삭제 선택"] = False
 
     def status_row_style(row):
         if row["상태"] == ACTIVE:
@@ -1065,18 +1072,22 @@ def list_page():
             color = "#d9ead3"
         else:
             color = ""
-        return [f"background-color: {color}" if color else "" for _ in row]
+        return [f"background-color: {color}" if color else ""]
 
     edited_table = st.data_editor(
-        table_rows.style.apply(status_row_style, axis=1),
+        table_rows.style.apply(status_row_style, axis=1, subset=["상태"]),
         hide_index=True,
         width="stretch",
+        height=750,
         num_rows="fixed",
         key="joint_status_editor",
         disabled=["_doc_id", "상태", "직반", "작업자", "프로젝트번호", "누계 진행률(%)",
                   "JOINT 누적(분)", "용접시작일자", "용접시작시간", "용접완료일자", "용접완료시간"],
         column_config={
             "_doc_id": None,
+            "프로젝트번호": "프로젝트",
+            "SPOOL_NO": "SPOOL NO",
+            "JOINT_NO": "JOINT NO",
             "삭제 선택": st.column_config.CheckboxColumn("삭제 선택"),
             "SPOOL_NO": st.column_config.TextColumn("SPOOL_NO"),
             "JOINT_NO": st.column_config.TextColumn("JOINT_NO"),
@@ -1148,30 +1159,19 @@ def list_page():
             },
         )
 
-    today = now().date()
-    recent_start = today - timedelta(days=2)
-    log_export_columns = ["상태", "직반", "작업자", "프로젝트번호", "SPOOL_NO", "JOINT_NO", "누계 진행률(%)", "당일 진행률(%)",
-                          "용접시작일자", "용접시작시간", "일시정지일자", "일시정지시간", "용접완료일자", "용접완료시간",
-                          "소요시간(분)", "JOINT 누적(분)"]
-    recent_export = df.loc[start.dt.date.between(recent_start, today), log_export_columns]
-    all_export = df[log_export_columns]
+    all_export = summary_df[summary_columns].copy()
+    all_export["_sort_start"] = summary_start
+    all_export = all_export.sort_values("_sort_start", ascending=False, kind="stable").drop(
+        columns="_sort_start"
+    )
+    all_export = all_export.rename(
+        columns={"프로젝트번호": "프로젝트", "SPOOL_NO": "SPOOL NO", "JOINT_NO": "JOINT NO"}
+    )
 
     stamp = now().strftime("%Y%m%d_%H%M")
     st.subheader("다운로드")
-    recent_filename = f"welding_last_3_days_{stamp}.xlsx"
-    recent_data = to_excel(recent_export)
-    all_filename = f"welding_all_data_{stamp}.xlsx"
+    all_filename = f"welding_status_{stamp}.xlsx"
     all_data = to_excel(all_export)
-
-    with st.container(horizontal=True):
-        st.download_button(
-            "📥 최근 3일 Excel",
-            recent_data,
-            file_name=recent_filename,
-            mime=XLSX_MIME,
-            type="primary",
-            width="stretch",
-        )
 
     st.download_button(
         "📥 전체 데이터 Excel",
@@ -1187,17 +1187,14 @@ def list_page():
         key="email_recipient",
         placeholder="name@example.com",
     ).strip()
-    with st.container(horizontal=True):
-        send_recent = st.button("📧 최근 3일 Excel 보내기", width="stretch", key="send_recent_email")
-        send_all = st.button("📧 전체 Excel 보내기", width="stretch", key="send_all_email")
+    send_all = st.button("📧 전체 Excel 보내기", width="stretch", key="send_all_email")
 
-    if send_recent or send_all:
+    if send_all:
         if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email_recipient):
             st.error("올바른 이메일 주소를 입력하세요.")
         else:
-            filename, data = (recent_filename, recent_data) if send_recent else (all_filename, all_data)
             try:
-                send_excel_email(email_recipient, filename, data)
+                send_excel_email(email_recipient, all_filename, all_data)
             except ValueError as exc:
                 st.error(str(exc))
             else:
