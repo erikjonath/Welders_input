@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import re
+import secrets as py_secrets
 import smtplib
 import ssl
 from datetime import datetime, timedelta
@@ -28,6 +29,258 @@ WORKERS = {
     "1직3반": ["바유함자", "아프릴라", "데디", "사뿌트라", "무지오노", "수다르모노", "유누스", "푸풍", "아흐마드샤피", "안자스"],
     "1직4반": ["라마", "샤리푸딘", "시딕", "알피안디", "카릴", "파이잘", "푸트라", "프라무디아", "헨드리"],
 }
+BASE_WORKERS = {team: list(names) for team, names in WORKERS.items()}
+ACCOUNT_COLLECTION = "welder_accounts"
+
+INDONESIAN = {
+    "언어 / Bahasa": "Bahasa / 언어",
+    "한국어": "Bahasa Korea",
+    "Bahasa Indonesia": "Bahasa Indonesia",
+    "용접 실적 입력 로그인": "Login Input Data Pengelasan",
+    "비밀번호": "Kata sandi",
+    "로그인": "Masuk",
+    "ID 또는 비밀번호가 올바르지 않습니다.": "ID atau kata sandi salah.",
+    "로그아웃": "Keluar",
+    "용접시작": "Mulai Pengelasan",
+    "용접완료": "Selesai Pengelasan",
+    "용접목록": "Daftar Pengelasan",
+    "계정관리": "Kelola Akun",
+    "이름": "Nama",
+    "직반": "Tim",
+    "이름을 선택하세요": "Pilih nama",
+    "직반을 선택하세요": "Pilih tim",
+    "직접입력": "Input manual",
+    "1직1반": "Shift 1 - Tim 1",
+    "1직2반": "Shift 1 - Tim 2",
+    "1직3반": "Shift 1 - Tim 3",
+    "1직4반": "Shift 1 - Tim 4",
+    "프로젝트": "Proyek",
+    "프로젝트 직접 입력": "Masukkan proyek",
+    "프로젝트 번호 입력": "Masukkan nomor proyek",
+    "SPOOL NO 입력": "Masukkan SPOOL NO",
+    "JOINT NO 입력": "Masukkan JOINT NO",
+    "용접시작 등록 완료": "Mulai pengelasan berhasil dicatat",
+    "용접완료 등록 완료": "Selesai pengelasan berhasil dicatat",
+    "용접취소": "Batalkan pengelasan",
+    "용접취소 확인": "Konfirmasi pembatalan pengelasan",
+    "예": "Ya",
+    "아니오": "Tidak",
+    "상태": "Status",
+    "진행중": "Sedang dikerjakan",
+    "일시정지": "Dijeda",
+    "일시정지 목록": "Daftar JOINT dijeda",
+    "완료": "Selesai",
+    "취소": "Dibatalkan",
+    "작업자": "Pekerja",
+    "프로젝트번호": "Proyek",
+    "SPOOL_NO": "SPOOL NO",
+    "JOINT_NO": "JOINT NO",
+    "진행률": "Progres",
+    "용접시작 확인": "Konfirmasi mulai pengelasan",
+    "용접완료 확인": "Konfirmasi selesai pengelasan",
+    "일시정지 확인": "Konfirmasi jeda",
+    "진행중 목록": "Daftar yang sedang dikerjakan",
+    "진행중인 JOINT가 없습니다.": "Tidak ada JOINT yang sedang dikerjakan.",
+    "용접시작으로 돌아가기": "Kembali ke Mulai Pengelasan",
+    "시작일": "Tanggal mulai",
+    "시작시간": "Waktu mulai",
+    "새로고침": "Muat ulang",
+    "필터": "Filter",
+    "전체": "Semua",
+    "용접시작일자 기간": "Rentang tanggal mulai pengelasan",
+    "SPOOL / JOINT 검색": "Cari SPOOL / JOINT",
+    "용접현황": "Status Pengelasan",
+    "다운로드": "Unduh",
+    "전체 데이터 Excel": "Semua data Excel",
+    "이메일로 보내기": "Kirim melalui email",
+    "받는 이메일 주소": "Alamat email penerima",
+    "전체 Excel 보내기": "Kirim semua data Excel",
+    "올바른 이메일 주소를 입력하세요.": "Masukkan alamat email yang valid.",
+    "관리자 로그인": "Login Admin",
+    "작업자 계정": "Akun pekerja",
+    "계정 목록": "Daftar akun",
+    "계정 추가": "Tambah akun",
+    "계정 저장": "Simpan akun",
+    "비밀번호 재설정": "Atur ulang kata sandi",
+    "계정 비활성화": "Nonaktifkan akun",
+    "계정 활성화": "Aktifkan akun",
+    "계정 설정": "Pengaturan akun",
+    "건의 SPOOL / JOINT 번호를 수정하고 연결된 전체 이력에 반영했습니다.":
+        "nomor SPOOL / JOINT berhasil diperbarui pada semua riwayat terkait.",
+    "주소로 Excel 파일을 보냈습니다.": " berhasil dikirim sebagai file Excel.",
+    "현재 저장된 진행률이 90%를 초과합니다. 추가 일시정지 대신 용접완료를 등록하세요.":
+        "Progres tersimpan melebihi 90%. Catat sebagai selesai, bukan jeda lagi.",
+    "일시정지까지의 진행률은 기록에 저장되고, 나머지는 입력되지 않습니다. ":
+        "Progres hingga jeda akan disimpan; sisanya tidak dicatat. ",
+    "이 JOINT의 진행률은 0%로 돌아갑니다. 용접취소하시겠습니까?":
+        "Progres JOINT ini akan kembali ke 0%. Batalkan pengelasan?",
+    "이 시각으로 용접시작을 등록하시겠습니까?": "Apakah mulai pengelasan akan dicatat pada waktu ini?",
+    "이 시각으로 용접완료를 등록하시겠습니까?": "Apakah selesai pengelasan akan dicatat pada waktu ini?",
+    "이 시각으로 일시정지를 등록하시겠습니까?": "Apakah jeda akan dicatat pada waktu ini?",
+    "이름 / 로그인 ID": "Nama / ID login",
+    "비밀번호 (비워두면 직반 번호)": "Kata sandi (kosongkan untuk memakai kode tim)",
+    "초기 비밀번호": "Kata sandi awal",
+    "계정 추가": "Tambah akun",
+    "계정 저장": "Simpan akun",
+    "계정 목록": "Daftar akun",
+    "계정 설정": "Pengaturan akun",
+    "계정 선택": "Pilih akun",
+    "새 비밀번호": "Kata sandi baru",
+    "비밀번호 재설정": "Atur ulang kata sandi",
+    "계정 비활성화": "Nonaktifkan akun",
+    "계정 활성화": "Aktifkan akun",
+    "비밀번호를 재설정했습니다.": "Kata sandi berhasil diatur ulang.",
+    "JOINT 상태 데이터가 없습니다.": "Tidak ada data status JOINT.",
+    "저장된 데이터가 없습니다.": "Belum ada data tersimpan.",
+    "저장된 작업 기록이 없습니다.": "Belum ada riwayat kerja tersimpan.",
+    "계정 선택": "Pilih akun",
+    "계정 유형": "Jenis akun",
+    "관리자 로그인을 사용하려면 Streamlit Secrets에 [auth] admin_password를 설정하세요.":
+        "Untuk login admin, atur [auth] admin_password di Streamlit Secrets.",
+    "언어 / Bahasa": "Bahasa",
+    "시각으로 용접시작을 등록하시겠습니까?": "Apakah mulai pengelasan akan dicatat pada waktu ini?",
+    "이 시각으로 용접시작을 등록하시겠습니까?": "Apakah mulai pengelasan akan dicatat pada waktu ini?",
+    "이 시각으로 용접완료를 등록하시겠습니까?": "Apakah penyelesaian pengelasan akan dicatat pada waktu ini?",
+    "이 시각으로 일시정지를 등록하시겠습니까?": "Apakah jeda akan dicatat pada waktu ini?",
+    "현재 저장된 진행률이 90%를 초과합니다. 추가 일시정지 대신 용접완료를 등록하세요.":
+        "Progres tersimpan saat ini melebihi 90%. Catat sebagai selesai, bukan jeda lagi.",
+    "다른 작업자의 JOINT에는 접근할 수 없습니다.": "Anda tidak dapat mengakses JOINT milik pekerja lain.",
+    "이 JOINT는 다른 작업자의 일시정지 작업입니다.": "JOINT ini sedang dijeda oleh pekerja lain.",
+    "이미 다시 시작되었거나 취소된 JOINT입니다.": "JOINT ini sudah dilanjutkan atau dibatalkan.",
+    "이미 일시정지 또는 완료 처리된 JOINT입니다.": "JOINT ini sudah dijeda atau diselesaikan.",
+    "일시정지 진행률은 최대 90%입니다. 100% 완료는 용접완료 버튼으로 등록하세요.":
+        "Progres jeda maksimal 90%. Catat 100% melalui tombol Selesai Pengelasan.",
+    "선택:": "Dipilih:",
+    "표의 JOINT 상태가 변경되었습니다. 새로고침 후 다시 시도하세요.":
+        "Status JOINT pada tabel telah berubah. Muat ulang dan coba lagi.",
+    "선택한 JOINT 중 일부에 접근할 수 없습니다. 새로고침 후 다시 선택하세요.":
+        "Sebagian JOINT tidak dapat diakses. Muat ulang lalu pilih kembali.",
+    "선택한 JOINT를 삭제할 권한이 없습니다.": "Anda tidak memiliki izin untuk menghapus JOINT yang dipilih.",
+    "선택한 JOINT의 현재 상태와 연결된 모든 작업 이력이 영구 삭제됩니다. 이 작업은 되돌릴 수 없습니다.":
+        "Status dan seluruh riwayat kerja JOINT terpilih akan dihapus permanen. Tindakan ini tidak dapat dibatalkan.",
+    "작업 이력이 변경되었습니다. 새로고침 후 다시 시도하세요.":
+        "Riwayat kerja telah berubah. Muat ulang dan coba lagi.",
+    "이 JOINT 정보가 다른 작업에서 변경되었습니다. 새로고침 후 다시 시도하세요.":
+        "Informasi JOINT ini telah berubah. Muat ulang dan coba lagi.",
+    "수정하려는 SPOOL/JOINT 번호가 이미 등록되어 있습니다.":
+        "Nomor SPOOL/JOINT yang ingin diubah sudah terdaftar.",
+    "SPOOL / JOINT 번호를 수정했습니다.": "Nomor SPOOL / JOINT berhasil diperbarui.",
+    "JOINT 상태 데이터가 없습니다.": "Tidak ada data status JOINT.",
+    "Firebase에 연결할 수 없습니다. Secrets의 [firebase] 설정을 확인하세요.":
+        "Tidak dapat terhubung ke Firebase. Periksa konfigurasi [firebase] di Secrets.",
+    "Gmail 발송 설정이 없습니다. Streamlit Secrets의 [email] 설정을 확인하세요.":
+        "Pengaturan Gmail belum tersedia. Periksa [email] di Streamlit Secrets.",
+    "Gmail 로그인이 거부되었습니다. Gmail 주소와 Google App Password를 확인하세요.":
+        "Login Gmail ditolak. Periksa alamat Gmail dan Google App Password.",
+    "Gmail 서버에 연결하거나 메일을 보내지 못했습니다. 설정을 확인하고 다시 시도하세요.":
+        "Tidak dapat menghubungi Gmail atau mengirim email. Periksa pengaturan dan coba lagi.",
+    "이 JOINT는 다른 작업자의 일시정지 작업입니다.": "JOINT ini sedang dijeda oleh pekerja lain.",
+    "이미 사용할 수 없는 JOINT입니다.": "JOINT ini sudah tidak tersedia.",
+    "취소": "Batal",
+    "항목을 선택하세요": "Pilih item",
+    "이 JOINT를 수정할 권한이 없습니다.": "Anda tidak memiliki izin untuk mengubah JOINT ini.",
+    "SPOOL NO와 JOINT NO를 모두 입력하세요.": "Masukkan SPOOL NO dan JOINT NO.",
+    "JOINT 상태 데이터가 없습니다.": "Tidak ada data status JOINT.",
+    "저장된 데이터가 없습니다.": "Belum ada data tersimpan.",
+    "저장된 작업 기록이 없습니다.": "Belum ada catatan kerja tersimpan.",
+    "삭제 선택": "Pilih untuk hapus",
+    "JOINT 현황": "Status JOINT",
+    "이미 사용할 수 없는 JOINT입니다.": "JOINT ini sudah tidak tersedia.",
+    "작업 방식": "Cara kerja",
+    "용접계속": "Lanjutkan pengelasan",
+    "용접사 변경": "Ganti pekerja",
+    "이전 진행률": "Progres sebelumnya",
+    "이전 작업자": "Pekerja sebelumnya",
+    "선택:": "Dipilih:",
+    "진행중인 JOINT": "JOINT yang sedang dikerjakan",
+    "항목을 선택하세요": "Pilih item",
+    "일시정지까지의 진행률은 기록에 저장되고, 나머지는 입력되지 않습니다. ":
+        "Progres hingga jeda akan disimpan; sisanya tidak dicatat. ",
+    "이 JOINT의 진행률은 0%로 돌아갑니다. 용접취소하시겠습니까?":
+        "Progres JOINT ini akan kembali ke 0%. Batalkan pengelasan?",
+    "선택한 JOINT": "JOINT yang dipilih",
+    "표시할 데이터가 없습니다.": "Tidak ada data untuk ditampilkan.",
+    "SPOOL / JOINT 번호를 수정했습니다.": "Nomor SPOOL / JOINT berhasil diperbarui.",
+    "계정을 추가했습니다.": "Akun berhasil ditambahkan.",
+    "초기 비밀번호:": "Kata sandi awal:",
+    "비밀번호를 재설정했습니다.": "Kata sandi berhasil diatur ulang.",
+    "비밀번호는 2자 이상 입력하세요.": "Kata sandi harus terdiri dari minimal 2 karakter.",
+    "사용할 수 없는 ID입니다.": "ID ini tidak dapat digunakan.",
+    "직반을 선택하세요.": "Pilih tim.",
+    "이미 사용 중인 ID입니다.": "ID ini sudah digunakan.",
+    "이미 등록된 ID입니다.": "ID ini sudah terdaftar.",
+    "계정을 찾을 수 없습니다. 새로고침 후 다시 시도하세요.": "Akun tidak ditemukan. Muat ulang dan coba lagi.",
+    "비밀번호": "Kata sandi",
+    "직반": "Tim",
+    "이름": "Nama",
+    "작업자": "Pekerja",
+    "SPOOL NO": "SPOOL NO",
+    "JOINT NO": "JOINT NO",
+    "용접시작일자": "Tanggal mulai",
+    "용접시작시간": "Waktu mulai",
+    "용접완료일자": "Tanggal selesai",
+    "용접완료시간": "Waktu selesai",
+    "일시정지일자": "Tanggal jeda",
+    "일시정지시간": "Waktu jeda",
+    "내용": "Detail",
+    "당일 진행률(%)": "Progres hari ini (%)",
+    "누계 진행률(%)": "Progres kumulatif (%)",
+    "JOINT 누적(분)": "Total JOINT (menit)",
+    "소요시간(분)": "Durasi (menit)",
+    "삭제 선택": "Pilih untuk hapus",
+    "수정할 JOINT 선택": "Pilih JOINT yang akan diperbaiki",
+    "SPOOL / JOINT 수정 저장": "Simpan perubahan SPOOL / JOINT",
+    "🗑️ 선택한 JOINT와 전체 이력 삭제": "🗑️ Hapus JOINT terpilih dan seluruh riwayat",
+    "작업 이력 상세 · 진행률 입력 기록": "Detail riwayat kerja · catatan progres",
+    "진행률 입력 기록": "Catatan progres",
+    "초기 비밀번호:": "Kata sandi awal:",
+    "용접시작 등록 완료:": "Mulai pengelasan dicatat:",
+    "용접완료 등록 완료:": "Selesai pengelasan dicatat:",
+    "일시정지 등록 완료:": "Jeda dicatat:",
+    "용접시작 페이지의 일시정지 목록에서 다시 시작할 수 있습니다.":
+        "Pengelasan dapat dilanjutkan dari daftar jeda pada halaman Mulai Pengelasan.",
+    "선택한 JOINT의 현재 상태와 연결된 모든 작업 이력이 영구 삭제됩니다. 이 작업은 되돌릴 수 없습니다.":
+        "Status dan seluruh riwayat kerja JOINT yang dipilih akan dihapus permanen. Tindakan ini tidak dapat dibatalkan.",
+    "용접목록": "Daftar Pengelasan",
+    "이메일로 보내기": "Kirim melalui email",
+    "받는 이메일 주소": "Alamat email penerima",
+    "전체 Excel 보내기": "Kirim semua data Excel",
+    "올바른 이메일 주소를 입력하세요.": "Masukkan alamat email yang valid.",
+    "현재 계정": "Akun saat ini",
+    "이름 / 로그인 ID": "Nama / ID login",
+    "초기 비밀번호": "Kata sandi awal",
+    "새 비밀번호": "Kata sandi baru",
+    "비밀번호 (비워두면 직반 번호)": "Kata sandi (kosongkan untuk memakai kode tim)",
+    "등록된 계정이 없습니다.": "Belum ada akun terdaftar.",
+    "관리자": "Admin",
+    "팀 관리자": "Admin tim",
+    "작업자": "Pekerja",
+    "활성": "Aktif",
+    "비활성": "Nonaktif",
+    "내 SPOOL / JOINT 번호 수정": "Perbaiki nomor SPOOL / JOINT saya",
+    "수정할 JOINT 선택": "Pilih JOINT yang akan diperbaiki",
+    "수정": "Simpan perubahan",
+    "선택한 JOINT가 없습니다.": "Tidak ada JOINT untuk dipilih.",
+}
+
+
+def t(text: str) -> str:
+    """Translate a UI label or message based on the selected interface language."""
+    if st.session_state.get("ui_language", "ko") == "id":
+        if text in INDONESIAN:
+            return INDONESIAN[text]
+        translated = text
+        for korean, indonesian in sorted(INDONESIAN.items(), key=lambda item: len(item[0]), reverse=True):
+            translated = translated.replace(korean, indonesian)
+        return translated
+    return text
+
+
+def language_selector(key: str = "language_selector"):
+    options = ["한국어", "Bahasa Indonesia"]
+    current = "Bahasa Indonesia" if st.session_state.get("ui_language", "ko") == "id" else "한국어"
+    selected = st.selectbox(t("언어 / Bahasa"), options, index=options.index(current), key=key)
+    st.session_state.ui_language = "id" if selected == "Bahasa Indonesia" else "ko"
 
 # Worker IDs are their names; passwords are the digits in their 직반,
 # e.g. 에릭 in 1직1반 signs in with ID 에릭 and password 11.
@@ -80,10 +333,39 @@ def configured_admin_password() -> str:
 
 
 def authenticate(login_id: str, password: str) -> dict | None:
+    if not login_id or "/" in login_id:
+        return None
     if login_id == "admin":
         expected = configured_admin_password()
         if expected and hmac.compare_digest(password, expected):
             return {"role": "admin", "name": "admin"}
+        return None
+
+    # Firestore-managed worker accounts are checked first. Disabled accounts do
+    # not fall back to the legacy hard-coded list.
+    managed_snapshot = _managed_account_doc(login_id).get()
+    if managed_snapshot.exists:
+        account = managed_snapshot.to_dict() or {}
+        role = account.get("role")
+        if not account.get("active", True):
+            return None
+        if account.get("password_hash"):
+            if _check_account_password(account, password):
+                return {
+                    "role": role,
+                    "name": account.get("name", login_id),
+                    "team": account.get("team", ""),
+                    "managed": True,
+                }
+            return None
+        if role == "worker":
+            builtin = WORKER_ACCOUNTS.get(login_id)
+            if builtin and hmac.compare_digest(password, builtin["password"]):
+                return {"role": "worker", "name": login_id, "team": account.get("team", builtin["team"])}
+        elif role == "team_admin":
+            builtin = SPECIAL_ACCOUNTS.get(login_id)
+            if builtin and hmac.compare_digest(password, builtin["password"]):
+                return {"role": "team_admin", "name": login_id, "team": account.get("team", builtin["team"])}
         return None
 
     special_account = SPECIAL_ACCOUNTS.get(login_id)
@@ -97,21 +379,22 @@ def authenticate(login_id: str, password: str) -> dict | None:
 
 
 def login_page():
-    st.title("용접 실적 입력 로그인")
+    language_selector("login_language_selector")
+    st.title(t("용접 실적 입력 로그인"))
     if not configured_admin_password():
-        st.warning("관리자 로그인을 사용하려면 Streamlit Secrets에 [auth] admin_password를 설정하세요.")
+        st.warning(t("관리자 로그인을 사용하려면 Streamlit Secrets에 [auth] admin_password를 설정하세요."))
 
     with st.form("login_form", clear_on_submit=True):
         login_id = st.text_input("ID", key="login_id")
-        password = st.text_input("비밀번호", type="password", key="login_password")
-        submitted = st.form_submit_button("로그인", type="primary", width="stretch")
+        password = st.text_input(t("비밀번호"), type="password", key="login_password")
+        submitted = st.form_submit_button(t("로그인"), type="primary", width="stretch")
 
     if submitted:
         user = authenticate(login_id.strip(), password)
         if user:
             st.session_state.current_user = user
             st.rerun()
-        st.error("ID 또는 비밀번호가 올바르지 않습니다.")
+        st.error(t("ID 또는 비밀번호가 올바르지 않습니다."))
 
 
 def current_user() -> dict:
@@ -154,8 +437,104 @@ def get_db() -> firestore.Client:
     try:
         return _client()
     except Exception as e:
-        st.error(f"Firebase에 연결할 수 없습니다. Secrets의 [firebase] 설정을 확인하세요. ({type(e).__name__})")
+        st.error(t(f"Firebase에 연결할 수 없습니다. Secrets의 [firebase] 설정을 확인하세요. ({type(e).__name__})"))
         st.stop()
+
+
+def _password_digest(password: str, salt: str) -> str:
+    return hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), bytes.fromhex(salt), 310_000
+    ).hex()
+
+
+def _check_account_password(account: dict, password: str) -> bool:
+    salt = str(account.get("password_salt", ""))
+    stored = str(account.get("password_hash", ""))
+    if not salt or not stored:
+        return False
+    try:
+        actual = _password_digest(password, salt)
+    except ValueError:
+        return False
+    return hmac.compare_digest(actual, stored)
+
+
+def _managed_account_doc(login_id: str):
+    return get_db().collection(ACCOUNT_COLLECTION).document(login_id)
+
+
+def managed_accounts() -> list[dict]:
+    rows = []
+    for snapshot in get_db().collection(ACCOUNT_COLLECTION).stream():
+        rows.append({"login_id": snapshot.id, **(snapshot.to_dict() or {})})
+    return sorted(rows, key=lambda row: (row.get("team", ""), row.get("name", "")))
+
+
+def refresh_worker_roster():
+    """Merge active Firestore-managed workers into the selectors used by the app."""
+    account_rows = managed_accounts()
+    inactive_builtin_workers = {
+        account["login_id"] for account in account_rows
+        if account.get("role") == "worker" and not account.get("active", True)
+    }
+    WORKERS.clear()
+    WORKERS.update({
+        team: [name for name in names if name not in inactive_builtin_workers]
+        for team, names in BASE_WORKERS.items()
+    })
+    for account in account_rows:
+        if account.get("role") == "worker" and account.get("active", True):
+            team, name = account.get("team"), account.get("name")
+            if team and name:
+                WORKERS.setdefault(team, [])
+                if name not in WORKERS[team]:
+                    WORKERS[team].append(name)
+
+
+def create_managed_account(login_id: str, team: str, password: str):
+    login_id = login_id.strip()
+    if not login_id or "/" in login_id or login_id in {"admin", *SPECIAL_ACCOUNTS}:
+        raise ValueError("사용할 수 없는 ID입니다.")
+    if team not in BASE_WORKERS:
+        raise ValueError("직반을 선택하세요.")
+    if login_id in WORKER_ACCOUNTS or login_id in SPECIAL_ACCOUNTS:
+        raise ValueError("이미 사용 중인 ID입니다.")
+    ref = _managed_account_doc(login_id)
+    if ref.get().exists:
+        raise ValueError("이미 등록된 ID입니다.")
+    if len(password) < 2:
+        raise ValueError("비밀번호는 2자 이상 입력하세요.")
+    salt = py_secrets.token_hex(16)
+    ref.set({
+        "name": login_id,
+        "team": team,
+        "role": "worker",
+        "active": True,
+        "password_salt": salt,
+        "password_hash": _password_digest(password, salt),
+        "created_at": now(),
+    })
+
+
+def update_managed_account(login_id: str, updates: dict):
+    ref = _managed_account_doc(login_id)
+    snapshot = ref.get()
+    if not snapshot.exists:
+        if login_id in WORKER_ACCOUNTS:
+            base = {
+                "name": login_id, "team": WORKER_ACCOUNTS[login_id]["team"],
+                "role": "worker", "active": True, "legacy_password": True,
+            }
+        elif login_id in SPECIAL_ACCOUNTS:
+            base = {
+                "name": login_id, "team": SPECIAL_ACCOUNTS[login_id]["team"],
+                "role": "team_admin", "active": True, "legacy_password": True,
+            }
+        else:
+            raise ValueError("계정을 찾을 수 없습니다. 새로고침 후 다시 시도하세요.")
+        ref.set({**base, **updates})
+    else:
+        ref.update(updates)
 
 def now() -> datetime:
     return datetime.now(KST).replace(tzinfo=None)
@@ -310,7 +689,9 @@ def joint_log_refs(rec: dict, refresh: bool = False) -> list:
     return [log_ref(int(value)) for value in df.loc[mask, "id"].tolist()]
 
 def rename_joint(rec: dict, spool: str, joint: str):
-    if not can_manage_team() or not can_access_record(rec["직반"], rec["작업자"]):
+    if not can_access_record(rec["직반"], rec["작업자"]):
+        raise ValueError("이 JOINT를 수정할 권한이 없습니다.")
+    if not can_manage_team() and current_user()["role"] != "worker":
         raise ValueError("이 JOINT를 수정할 권한이 없습니다.")
     spool, joint = spool.strip().upper(), joint.strip().upper()
     if not spool or not joint:
@@ -363,9 +744,9 @@ def delete_joint_records(doc_ids: list[str]):
         raise ValueError(str(exc)) from exc
     clear_cache()
 
-@st.dialog("선택한 JOINT 데이터 삭제")
+@st.dialog(t("선택한 JOINT 데이터 삭제"))
 def confirm_joint_delete(doc_ids: list[str], labels: dict[str, str]):
-    st.warning("선택한 JOINT의 현재 상태와 연결된 모든 작업 이력이 영구 삭제됩니다. 이 작업은 되돌릴 수 없습니다.")
+    st.warning(t("선택한 JOINT의 현재 상태와 연결된 모든 작업 이력이 영구 삭제됩니다. 이 작업은 되돌릴 수 없습니다."))
     for doc_id in doc_ids:
         st.write(f"• {labels.get(doc_id, doc_id)}")
     confirm, cancel = yes_no()
@@ -373,7 +754,7 @@ def confirm_joint_delete(doc_ids: list[str], labels: dict[str, str]):
         try:
             delete_joint_records(doc_ids)
         except ValueError as exc:
-            st.error(str(exc))
+            st.error(t(str(exc)))
         else:
             st.session_state.pop("delete_joint_pending", None)
             st.session_state.reset_joint_status_editor = True
@@ -388,27 +769,30 @@ def confirm_joint_delete(doc_ids: list[str], labels: dict[str, str]):
 def nav_bar(current: str):
     with st.container(horizontal=True, key="navbar"):
         user = current_user()
-        nav_items = [("start", "🔥 용접시작")]
+        nav_items = [("start", f"🔥 {t('용접시작')}")]
         if can_manage_team() or active_segments(user["team"], user["name"]):
-            nav_items.append(("finish", "✅ 용접완료"))
+            nav_items.append(("finish", f"✅ {t('용접완료')}"))
         if can_manage_team():
-            nav_items.append(("list", "📋 용접목록"))
+            nav_items.append(("list", f"📋 {t('용접목록')}"))
+        if is_admin():
+            nav_items.append(("accounts", f"👥 {t('계정관리')}"))
         for key, label in nav_items:
             clicked = st.button(
                 label, key=f"nav_{key}", type="primary" if key == current else "secondary", width="stretch"
             )
             if clicked and key != current:
                 st.switch_page(PAGES[key])
+    language_selector("app_language_selector")
     user = current_user()
     if is_admin():
-        display_name = "관리자"
+        display_name = t("관리자")
     elif is_team_admin():
-        display_name = f"팀 관리자 · {user['team']}"
+        display_name = f"{t('팀 관리자')} · {t(user['team'])}"
     else:
-        display_name = f"{user['team']} · {user['name']}"
+        display_name = f"{t(user['team'])} · {user['name']}"
     with st.container(horizontal=True):
-        st.caption(f"로그인: {display_name}")
-        if st.button("로그아웃", key="nav_logout", width="stretch"):
+        st.caption(f"{t('로그인')}: {display_name}")
+        if st.button(t("로그아웃"), key="nav_logout", width="stretch"):
             st.session_state.pop("current_user", None)
             st.rerun()
     st.write("")
@@ -422,10 +806,11 @@ def pick_worker(
         team = fixed_team
     else:
         team = st.selectbox(
-            "직반",
+            t("직반"),
             list(WORKERS),
+            format_func=t,
             index=None,
-            placeholder="직반을 선택하세요",
+            placeholder=t("직반을 선택하세요"),
             key=f"{key}_team",
             on_change=lambda: st.session_state.pop(f"{key}_name", None),
         )
@@ -434,7 +819,7 @@ def pick_worker(
     names = [n for n in WORKERS[team] if (team, n) != exclude]
     if st.session_state.get(f"{key}_name") not in names:
         st.session_state.pop(f"{key}_name", None)
-    name = st.selectbox("이름", names, index=None, placeholder="이름을 선택하세요", key=f"{key}_name")
+    name = st.selectbox(t("이름"), names, index=None, placeholder=t("이름을 선택하세요"), key=f"{key}_name")
     return team, name
 
 def remember_worker(team: str, name: str):
@@ -463,12 +848,13 @@ def show_record(rec: dict, extra: dict | None = None):
         "JOINT NO": rec["JOINT_NO"],
         **(extra or {}),
     }
-    st.table(pd.DataFrame({"내용": list(rows.values())}, index=list(rows.keys())))
+    rows = {t(label): t(value) if isinstance(value, str) else value for label, value in rows.items()}
+    st.table(pd.DataFrame({t("내용"): list(rows.values())}, index=list(rows.keys())))
 
 def yes_no() -> tuple[bool, bool]:
     with st.container(horizontal=True):
-        yes = st.button("예", type="primary", width="stretch")
-        no = st.button("아니오", width="stretch")
+        yes = st.button(t("예"), type="primary", width="stretch")
+        no = st.button(t("아니오"), width="stretch")
     return yes, no
 
 def joint_label(rec: dict) -> str:
@@ -487,24 +873,24 @@ def save_start(rec: dict, ts: datetime):
         _start_tx(get_db().transaction(), joint_ref(seg), log_ref(seg["id"]), seg)
     except JointTaken:
         st.session_state.start_error = (
-            f"JOINT {rec['JOINT_NO']}은(는) 이미 다른 작업자가 용접시작했거나 완료된 JOINT입니다. 목록을 확인하세요."
+            t(f"JOINT {rec['JOINT_NO']}은(는) 이미 다른 작업자가 용접시작했거나 완료된 JOINT입니다. 목록을 확인하세요.")
         )
         return
     clear_cache()
     st.session_state.start_result = {**rec, "date": date, "time": time}
     st.session_state.start_reset = True
 
-@st.dialog("용접시작 확인")
+@st.dialog(t("용접시작 확인"))
 def start_dialog(rec: dict, prev: dict | None, ts: datetime):
     extra = {}
     if prev:
-        extra["이전 진행률"] = f"{prev['진행률'] or 0}%"
+        extra[t("이전 진행률")] = f"{prev['진행률'] or 0}%"
         if (prev["직반"], prev["작업자"]) != (rec["직반"], rec["작업자"]):
-            extra["이전 작업자"] = f"{prev['직반']} {prev['작업자']}"
+            extra[t("이전 작업자")] = f"{t(prev['직반'])} {prev['작업자']}"
     show_record(rec, extra)
     date, time = fmt(ts)
     st.markdown(f"### {date} {time}")
-    st.write("이 시각으로 용접시작을 등록하시겠습니까?")
+    st.write(t("이 시각으로 용접시작을 등록하시겠습니까?"))
     yes, no = yes_no()
     if yes:
         save_start(rec, ts)
@@ -516,21 +902,21 @@ def start_controls(rec: dict, prev: dict | None, me: tuple[str, str] | None, key
     worker = me
     if prev:
         prev_worker = (prev["직반"], prev["작업자"])
-        st.info(
+        st.info(t(
             f"⏸ 일시정지된 JOINT — 진행률 **{prev['진행률'] or 0}%** · "
             f"이전 작업자 {prev_worker[0]} {prev_worker[1]}"
-        )
+        ))
         if can_manage_team():
             choice = st.radio(
-                "작업 방식",
-                ["용접계속", "용접사 변경"],
+                t("작업 방식"),
+                [t("용접계속"), t("용접사 변경")],
                 index=None,
                 horizontal=True,
                 key=f"{key}_choice",
             )
             if choice is None:
                 return
-            if choice == "용접계속":
+            if choice == t("용접계속"):
                 worker = prev_worker
             else:
                 if me and me != prev_worker and f"{key}_team" not in st.session_state:
@@ -538,36 +924,36 @@ def start_controls(rec: dict, prev: dict | None, me: tuple[str, str] | None, key
                 fixed_team = None if is_admin() else current_user()["team"]
                 worker = pick_worker(key, exclude=prev_worker, fixed_team=fixed_team)
         elif prev_worker != me:
-            st.error("다른 작업자의 JOINT에는 접근할 수 없습니다.")
+            st.error(t("다른 작업자의 JOINT에는 접근할 수 없습니다."))
             return
     if not worker or not worker[1]:
         return
     record = {"직반": worker[0], "작업자": worker[1], **rec}
-    if st.button("용접시작", type="primary", width="stretch", key=f"go_{key}"):
+    if st.button(t("용접시작"), type="primary", width="stretch", key=f"go_{key}"):
         start_dialog(record, prev, now())
 
 PROJECTS = ["SN2686", "SN2688"]
 OTHER_PROJECT = "직접입력"
 
 def start_search(me: tuple[str, str]):
-    choice = st.radio("프로젝트", [*PROJECTS, OTHER_PROJECT], index=None, horizontal=True, key="s_project")
-    if choice == OTHER_PROJECT:
-        project = st.text_input("프로젝트 직접 입력", key="s_project_other", placeholder="프로젝트 번호 입력").strip().upper()
+    choice = st.radio(t("프로젝트"), [*PROJECTS, t(OTHER_PROJECT)], index=None, horizontal=True, key="s_project")
+    if choice == t(OTHER_PROJECT):
+        project = st.text_input(t("프로젝트 직접 입력"), key="s_project_other", placeholder=t("프로젝트 번호 입력")).strip().upper()
     else:
         project = choice
     if not project:
         return
     spool = st.text_input(
-        "SPOOL NO",
+        t("SPOOL NO"),
         key="s_spool",
-        placeholder="SPOOL NO 입력",
+        placeholder=t("SPOOL NO 입력"),
         on_change=uppercase_input,
         args=("s_spool",),
     ).strip().upper()
     joint = st.text_input(
-        "JOINT NO",
+        t("JOINT NO"),
         key="s_joint",
-        placeholder="JOINT NO 입력",
+        placeholder=t("JOINT NO 입력"),
         on_change=uppercase_input,
         args=("s_joint",),
     ).strip().upper()
@@ -581,18 +967,76 @@ def start_search(me: tuple[str, str]):
         and seg["상태"] == PAUSED
         and not can_access_record(seg["직반"], seg["작업자"])
     ):
-        st.warning("이 JOINT는 다른 작업자의 일시정지 작업입니다.")
+        st.warning(t("이 JOINT는 다른 작업자의 일시정지 작업입니다."))
         return
     if seg and seg["상태"] in (ACTIVE, DONE):
         if not can_access_record(seg["직반"], seg["작업자"]):
-            st.warning("이미 사용할 수 없는 JOINT입니다.")
+            st.warning(t("이미 사용할 수 없는 JOINT입니다."))
             return
         who = f" ({seg['직반']} {seg['작업자']})" if seg["상태"] == ACTIVE else ""
-        st.warning(f"이미 {seg['상태']}인 JOINT입니다.{who}")
+        st.warning(t(f"이미 {seg['상태']}인 JOINT입니다.{who}"))
         return
     prev = seg if seg and seg["상태"] == PAUSED else None
     rec = {"프로젝트번호": project, "입력방식": INPUT_MODE, "SPOOL_NO": spool, "TAG_NO": tag, "JOINT_NO": joint}
     start_controls(rec, prev, me, key=f"c_s_{project}_{spool}_{tag}_{joint}")
+
+
+def own_joint_correction():
+    user = current_user()
+    rows = [
+        row for row in load_joint_states()
+        if row.get("직반") == user.get("team") and row.get("작업자") == user.get("name")
+    ]
+    rows.sort(
+        key=lambda row: (
+            row.get("용접시작일자", ""), row.get("용접시작시간", ""), row.get("SPOOL_NO", ""), row.get("JOINT_NO", "")
+        ),
+        reverse=True,
+    )
+    with st.expander(t("내 SPOOL / JOINT 번호 수정"), expanded=False):
+        if not rows:
+            st.caption(t("선택한 JOINT가 없습니다."))
+            return
+        by_id = {row["_doc_id"]: row for row in rows}
+        if st.session_state.get("worker_edit_joint_select") not in by_id:
+            st.session_state.pop("worker_edit_joint_select", None)
+        selected_id = st.selectbox(
+            t("수정할 JOINT 선택"),
+            list(by_id),
+            format_func=lambda doc_id: (
+                f"{by_id[doc_id].get('프로젝트번호', '')} · {joint_label(by_id[doc_id])} "
+                f"· {t(by_id[doc_id].get('상태', ''))}"
+            ),
+            key="worker_edit_joint_select",
+        )
+        rec = by_id[selected_id]
+        version = st.session_state.get("worker_edit_version", 0)
+        spool_key = f"worker_edit_spool_{selected_id}_{version}"
+        joint_key_name = f"worker_edit_joint_{selected_id}_{version}"
+        left, right = st.columns(2)
+        spool = left.text_input(
+            t("SPOOL NO"), value=str(rec.get("SPOOL_NO") or ""), key=spool_key,
+            on_change=uppercase_input, args=(spool_key,),
+        ).strip().upper()
+        joint_no = right.text_input(
+            t("JOINT NO"), value=str(rec.get("JOINT_NO") or ""), key=joint_key_name,
+            on_change=uppercase_input, args=(joint_key_name,),
+        ).strip().upper()
+        save_col, cancel_col = st.columns(2)
+        if save_col.button(t("수정"), type="primary", key="worker_edit_joint_save", width="stretch"):
+            try:
+                rename_joint(rec, spool, joint_no)
+            except ValueError as exc:
+                st.error(t(str(exc)))
+            else:
+                st.session_state.worker_edit_version = version + 1
+                st.session_state.worker_edit_message = "SPOOL / JOINT 번호를 수정했습니다."
+                st.rerun()
+        if cancel_col.button(t("취소"), key="worker_edit_joint_cancel", width="stretch"):
+            st.session_state.worker_edit_version = version + 1
+            st.rerun()
+        if message := st.session_state.pop("worker_edit_message", None):
+            st.success(t(message))
 
 def cancel_joint(prev: dict):
     try:
@@ -607,11 +1051,11 @@ def cancel_joint(prev: dict):
         f"일시정지까지의 진행률 {prev['진행률'] or 0}%는 기록에 저장되고, 이 JOINT는 0%부터 다시 시작합니다.",
     )
 
-@st.dialog("용접취소 확인")
+@st.dialog(t("용접취소 확인"))
 def cancel_dialog(prev: dict):
     show_record(prev, {"일시정지 진행률": f"{prev['진행률'] or 0}%"})
-    st.write("일시정지까지의 진행률은 기록에 저장되고, 나머지는 입력되지 않습니다. "
-             "이 JOINT의 진행률은 0%로 돌아갑니다. 용접취소하시겠습니까?")
+    st.write(t("일시정지까지의 진행률은 기록에 저장되고, 나머지는 입력되지 않습니다. "
+               "이 JOINT의 진행률은 0%로 돌아갑니다. 용접취소하시겠습니까?"))
     yes, no = yes_no()
     if yes:
         cancel_joint(prev)
@@ -626,7 +1070,7 @@ def paused_section(me: tuple[str, str] | None):
             rows = [r for r in rows if r["직반"] == current_user()["team"]]
         else:
             rows = [r for r in rows if (r["직반"], r["작업자"]) == me]
-    st.subheader(f"⏸ 일시정지 목록 ({len(rows)}건)")
+    st.subheader(f"⏸ {t('일시정지 목록')} ({len(rows)}건)")
     if not rows:
         return
 
@@ -634,13 +1078,13 @@ def paused_section(me: tuple[str, str] | None):
         rows.sort(key=lambda r: (r["직반"], r["작업자"]) != me)
     table = pd.DataFrame(
         {
-            "이름": r["작업자"],
-            "SPOOL NO": r["SPOOL_NO"],
-            "JOINT NO": r["JOINT_NO"],
-            "진행률": r["진행률"] or 0,
-            "직반": r["직반"],
-            "일시정지": f"{r['일시정지일자']} {r['일시정지시간']}",
-            "프로젝트": r["프로젝트번호"],
+            t("이름"): r["작업자"],
+            t("SPOOL NO"): r["SPOOL_NO"],
+            t("JOINT NO"): r["JOINT_NO"],
+            t("진행률"): r["진행률"] or 0,
+            t("직반"): r["직반"],
+            t("일시정지"): f"{r['일시정지일자']} {r['일시정지시간']}",
+            t("프로젝트"): r["프로젝트번호"],
         }
         for r in rows
     )
@@ -652,15 +1096,15 @@ def paused_section(me: tuple[str, str] | None):
         selection_mode="single-row",
         key=f"tbl_paused_{hash(tuple(r['id'] for r in rows))}",
         column_config={
-            "진행률": st.column_config.ProgressColumn("진행률", format="%d%%", min_value=0, max_value=100)
+            t("진행률"): st.column_config.ProgressColumn(t("진행률"), format="%d%%", min_value=0, max_value=100)
         },
     )
     if not event.selection.rows:
         return
 
     prev = rows[event.selection.rows[0]]
-    st.markdown(f"**선택:** {joint_label(prev)}")
-    if st.button("🚫 용접취소", width="stretch", key=f"cancel_{prev['id']}"):
+    st.markdown(f"**{t('선택:')}** {joint_label(prev)}")
+    if st.button(f"🚫 {t('용접취소')}", width="stretch", key=f"cancel_{prev['id']}"):
         cancel_dialog(prev)
     rec = {k: prev[k] for k in ("프로젝트번호", "입력방식", "SPOOL_NO", "TAG_NO", "JOINT_NO")}
     start_controls(rec, prev, me, key=f"c_p_{prev['id']}")
@@ -668,23 +1112,23 @@ def paused_section(me: tuple[str, str] | None):
 def start_page():
     nav_bar("start")
     if notice := st.session_state.pop("start_notice", None):
-        (st.success if notice[0] == "success" else st.error)(notice[1])
+        (st.success if notice[0] == "success" else st.error)(t(notice[1]))
     if st.session_state.pop("start_reset", False):
         for key in list(st.session_state):
             if key in ("s_spool", "s_joint") or key.startswith("c_"):
                 del st.session_state[key]
     if res := st.session_state.pop("start_result", None):
-        st.success(
+        st.success(t(
             f"용접시작 등록 완료: **{res['date']} {res['time']}**  \n"
             f"{res['직반']} {res['작업자']} · {joint_label(res)}"
-        )
+        ))
         user = current_user()
         if user["role"] == "worker" and active_segments(user["team"], user["name"]):
             st.switch_page(PAGES["finish"])
     if msg := st.session_state.pop("cancel_msg", None):
-        (st.success if msg[0] == "success" else st.error)(msg[1])
+        (st.success if msg[0] == "success" else st.error)(t(msg[1]))
     if err := st.session_state.pop("start_error", None):
-        st.error(err)
+        st.error(t(err))
 
     user = current_user()
     if is_admin():
@@ -702,6 +1146,9 @@ def start_page():
             remember_worker(*me)
         start_search(me)
 
+    if user["role"] == "worker":
+        own_joint_correction()
+
     st.divider()
     paused_section(me)
 
@@ -710,7 +1157,7 @@ def end_segment(rec: dict, ts: datetime, status: str, progress: int):
     if status == PAUSED and progress > 90:
         st.session_state.finish_msg = (
             "error",
-            "일시정지 진행률은 최대 90%입니다. 100% 완료는 용접완료 버튼으로 등록하세요.",
+            t("일시정지 진행률은 최대 90%입니다. 100% 완료는 용접완료 버튼으로 등록하세요."),
         )
         return
     date, time = fmt(ts)
@@ -732,12 +1179,12 @@ def end_segment(rec: dict, ts: datetime, status: str, progress: int):
             st.session_state.finish_msg = ("success", f"용접완료 등록 완료: **{date} {time}**  \n{joint_label(rec)}")
     st.session_state.pop("f_record", None)
 
-@st.dialog("용접완료 확인")
+@st.dialog(t("용접완료 확인"))
 def finish_dialog(rec: dict, ts: datetime):
     show_record(rec, {"용접시작": f"{rec['용접시작일자']} {rec['용접시작시간']}"})
     date, time = fmt(ts)
     st.markdown(f"### {date} {time}")
-    st.write("이 시각으로 용접완료를 등록하시겠습니까?")
+    st.write(t("이 시각으로 용접완료를 등록하시겠습니까?"))
     yes, no = yes_no()
     if yes:
         end_segment(rec, ts, DONE, 100)
@@ -745,21 +1192,21 @@ def finish_dialog(rec: dict, ts: datetime):
     if no:
         st.rerun()
 
-@st.dialog("일시정지 확인")
+@st.dialog(t("일시정지 확인"))
 def pause_dialog(rec: dict, min_progress: int, ts: datetime):
     show_record(rec, {"용접시작": f"{rec['용접시작일자']} {rec['용접시작시간']}"})
     date, time = fmt(ts)
     st.markdown(f"### {date} {time}")
     if min_progress > 90:
-        st.warning("현재 저장된 진행률이 90%를 초과합니다. 추가 일시정지 대신 용접완료를 등록하세요.")
+        st.warning(t("현재 저장된 진행률이 90%를 초과합니다. 추가 일시정지 대신 용접완료를 등록하세요."))
         return
     elif min_progress == 90:
         progress = 90
     else:
         progress = st.slider(
-            "진행률", min_value=min_progress, max_value=90, value=min_progress, step=10, format="%d%%"
+            t("진행률"), min_value=min_progress, max_value=90, value=min_progress, step=10, format="%d%%"
         )
-    st.write("이 시각으로 일시정지를 등록하시겠습니까?")
+    st.write(t("이 시각으로 일시정지를 등록하시겠습니까?"))
     yes, no = yes_no()
     if yes:
         end_segment(rec, ts, PAUSED, progress)
@@ -770,14 +1217,14 @@ def pause_dialog(rec: dict, min_progress: int, ts: datetime):
 def my_active_section(team: str, name: str):
     records = {r["id"]: r for r in active_segments(team, name)}
     if not records:
-        st.info("진행중인 JOINT가 없습니다.")
+        st.info(t("진행중인 JOINT가 없습니다."))
         return
 
     ids = list(records)
     if st.session_state.get("f_record") not in ids:
         st.session_state.pop("f_record", None)
     rid = st.radio(
-        f"진행중인 JOINT ({len(ids)}건) — 항목을 선택하세요",
+        f"{t('진행중인 JOINT')} ({len(ids)}건) — {t('항목을 선택하세요')}",
         ids,
         index=None,
         format_func=lambda i: f"SPOOL {records[i]['SPOOL_NO']}  |  JOINT {records[i]['JOINT_NO']}",
@@ -786,8 +1233,8 @@ def my_active_section(team: str, name: str):
     if rid is None:
         return
     with st.container(horizontal=True):
-        pause = st.button("⏸ 일시정지", width="stretch", key="f_pause")
-        done = st.button("용접완료", type="primary", width="stretch", key="f_done")
+        pause = st.button(f"⏸ {t('일시정지')}", width="stretch", key="f_pause")
+        done = st.button(t("용접완료"), type="primary", width="stretch", key="f_done")
     if pause:
         pause_dialog(records[rid], joint_progress(records[rid]), now())
     if done:
@@ -798,19 +1245,19 @@ def active_list_section(me: tuple[str, str] | None = None, team_scope: str | Non
         rows = active_segments(*me)
     else:
         rows = active_segments(team=team_scope)
-    st.subheader(f"🔧 진행중 목록 ({len(rows)}건)")
+    st.subheader(f"🔧 {t('진행중 목록')} ({len(rows)}건)")
     if not rows:
-        st.caption("진행중인 JOINT가 없습니다.")
+        st.caption(t("진행중인 JOINT가 없습니다."))
         return
     st.dataframe(
         pd.DataFrame(
             {
-                "직반": r["직반"],
-                "이름": r["작업자"],
-                "SPOOL NO": r["SPOOL_NO"],
-                "JOINT NO": r["JOINT_NO"],
-                "시작일": r["용접시작일자"],
-                "시작시간": r["용접시작시간"],
+                t("직반"): r["직반"],
+                t("이름"): r["작업자"],
+                t("SPOOL NO"): r["SPOOL_NO"],
+                t("JOINT NO"): r["JOINT_NO"],
+                t("시작일"): r["용접시작일자"],
+                t("시작시간"): r["용접시작시간"],
             }
             for r in rows
         ),
@@ -827,14 +1274,17 @@ def finish_page():
 
     nav_bar("finish")
     if msg := st.session_state.pop("finish_msg", None):
-        (st.success if msg[0] == "success" else st.error)(msg[1])
+        (st.success if msg[0] == "success" else st.error)(t(msg[1]))
         if msg[0] == "success" and st.button(
-            "🔥 용접시작으로 돌아가기",
+            f"🔥 {t('용접시작으로 돌아가기')}",
             type="primary",
             width="stretch",
             key="return_to_start_after_finish",
         ):
             st.switch_page(PAGES["start"])
+
+    if user["role"] == "worker":
+        own_joint_correction()
 
     if is_admin():
         team, name = pick_worker()
@@ -865,8 +1315,9 @@ def finish_page():
 def to_excel(df: pd.DataFrame) -> bytes:
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="용접현황")
-        sheet = writer.sheets["용접현황"]
+        sheet_name = t("용접현황")
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+        sheet = writer.sheets[sheet_name]
         for col_cells in sheet.columns:
             width = max(len(str(c.value)) if c.value is not None else 0 for c in col_cells)
             sheet.column_dimensions[col_cells[0].column_letter].width = min(max(width * 1.3 + 2, 8), 40)
@@ -918,11 +1369,11 @@ def list_page():
         st.session_state.pop("joint_status_editor", None)
 
     nav_bar("list")
-    if st.button("🔄 새로고침", key="l_refresh"):
+    if st.button(f"🔄 {t('새로고침')}", key="l_refresh"):
         clear_cache()
     df = load_log()
     if df.empty:
-        st.info("저장된 데이터가 없습니다.")
+        st.info(t("저장된 데이터가 없습니다."))
         return
 
     df = df.sort_values("id").reset_index(drop=True) 
@@ -933,7 +1384,7 @@ def list_page():
         else:
             df = df[(df["직반"] == user["team"]) & (df["작업자"] == user["name"])].copy()
         if df.empty:
-            st.info("저장된 작업 기록이 없습니다.")
+            st.info(t("저장된 작업 기록이 없습니다."))
             return
 
     start = pd.to_datetime(df["용접시작일자"].str.cat(df["용접시작시간"], sep=" "))
@@ -981,7 +1432,7 @@ def list_page():
         })
     summary_df = pd.DataFrame(summary_rows)
     if summary_df.empty:
-        st.info("JOINT 상태 데이터가 없습니다.")
+        st.info(t("JOINT 상태 데이터가 없습니다."))
         return
     summary_start = pd.to_datetime(
         summary_df["용접시작일자"].astype(str) + " " + summary_df["용접시작시간"].astype(str),
@@ -990,31 +1441,31 @@ def list_page():
     today = now().date()
     recent_start = today - timedelta(days=2)
 
-    with st.expander("필터", expanded=False):
+    with st.expander(t("필터"), expanded=False):
         if is_admin():
             c1, c2 = st.columns(2)
-            team = c1.selectbox("직반", ["전체", *WORKERS], key="l_team")
+            team = c1.selectbox(t("직반"), ["전체", *WORKERS], format_func=t, key="l_team")
             names = sorted(summary_df["작업자"].unique()) if team == "전체" else sorted(
                 summary_df.loc[summary_df["직반"] == team, "작업자"].unique()
             )
-            name = c2.selectbox("이름", ["전체", *names], key=f"l_name_{team}")
+            name = c2.selectbox(t("이름"), ["전체", *names], format_func=t, key=f"l_name_{team}")
         elif is_team_admin():
             team = user["team"]
             c1, c2 = st.columns(2)
-            c1.text_input("직반", value=team, disabled=True)
+            c1.text_input(t("직반"), value=t(team), disabled=True)
             names = sorted(summary_df.loc[summary_df["직반"] == team, "작업자"].unique())
-            name = c2.selectbox("이름", ["전체", *names], key=f"l_name_{team}")
+            name = c2.selectbox(t("이름"), ["전체", *names], format_func=t, key=f"l_name_{team}")
         else:
             team, name = user["team"], user["name"]
-        status = st.radio("상태", ["전체", ACTIVE, PAUSED, DONE, CANCELED], horizontal=True, key="l_status")
+        status = st.radio(t("상태"), ["전체", ACTIVE, PAUSED, DONE, CANCELED], format_func=t, horizontal=True, key="l_status")
         valid_start = summary_start.dropna()
         first, last = (
             (valid_start.min().date(), valid_start.max().date())
             if not valid_start.empty else (start.min().date(), start.max().date())
         )
         default_period = (recent_start, today) if is_team_admin() else (first, last)
-        period = st.date_input("용접시작일자 기간", default_period, key="l_period")
-        search = st.text_input("SPOOL / JOINT 검색", key="l_search").strip().lower()
+        period = st.date_input(t("용접시작일자 기간"), default_period, key="l_period")
+        search = st.text_input(t("SPOOL / JOINT 검색"), key="l_search").strip().lower()
 
     mask = pd.Series(True, index=df.index)
     if team != "전체":
@@ -1055,13 +1506,13 @@ def list_page():
 
     with st.container(horizontal=True):
         st.metric("JOINT", f"{len(shown_summary):,}")
-        st.metric("진행중", f"{(shown_summary['상태'] == ACTIVE).sum():,}")
-        st.metric("일시정지", f"{(shown_summary['상태'] == PAUSED).sum():,}")
-        st.metric("완료", f"{(shown_summary['상태'] == DONE).sum():,}")
+        st.metric(t("진행중"), f"{(shown_summary['상태'] == ACTIVE).sum():,}")
+        st.metric(t("일시정지"), f"{(shown_summary['상태'] == PAUSED).sum():,}")
+        st.metric(t("완료"), f"{(shown_summary['상태'] == DONE).sum():,}")
 
     summary_columns = ["상태", "작업자", "프로젝트번호", "SPOOL_NO", "JOINT_NO", "누계 진행률(%)",
                        "JOINT 누적(분)", "직반", "용접시작일자", "용접시작시간", "용접완료일자", "용접완료시간"]
-    st.subheader("용접현황")
+    st.subheader(t("용접현황"))
     table_rows = shown_summary[["_doc_id", *summary_columns]].copy().reset_index(drop=True)
     table_rows["삭제 선택"] = False
 
@@ -1080,7 +1531,7 @@ def list_page():
         # Recompute after filters/reruns: fit the visible rows, up to about 20.
         editor_height = min(750, 65 + 35 * min(len(table_rows), 20))
         edited_table = st.data_editor(
-            table_rows.style.apply(status_row_style, axis=1, subset=["상태"]),
+            table_rows.style.format({"상태": t}).apply(status_row_style, axis=1, subset=["상태"]),
             hide_index=True,
             width="stretch",
             height=editor_height,
@@ -1091,24 +1542,29 @@ def list_page():
                       "JOINT 누적(분)", "용접시작일자", "용접시작시간", "용접완료일자", "용접완료시간"],
             column_config={
                 "_doc_id": None,
-                "프로젝트번호": "프로젝트",
-                "SPOOL_NO": "SPOOL NO",
-                "JOINT_NO": "JOINT NO",
-                "삭제 선택": st.column_config.CheckboxColumn("삭제 선택"),
-                "SPOOL_NO": st.column_config.TextColumn("SPOOL_NO"),
-                "JOINT_NO": st.column_config.TextColumn("JOINT_NO"),
-                "누계 진행률(%)": st.column_config.ProgressColumn("누계 진행률(%)", format="%d%%", min_value=0, max_value=100),
-                "JOINT 누적(분)": st.column_config.NumberColumn("JOINT 누적(분)", format="%.1f"),
+                "상태": t("상태"),
+                "작업자": t("작업자"),
+                "직반": t("직반"),
+                "프로젝트번호": t("프로젝트"),
+                "삭제 선택": st.column_config.CheckboxColumn(t("삭제 선택")),
+                "SPOOL_NO": st.column_config.TextColumn(t("SPOOL_NO")),
+                "JOINT_NO": st.column_config.TextColumn(t("JOINT_NO")),
+                "누계 진행률(%)": st.column_config.ProgressColumn(t("누계 진행률(%)"), format="%d%%", min_value=0, max_value=100),
+                "JOINT 누적(분)": st.column_config.NumberColumn(t("JOINT 누적(분)"), format="%.1f"),
+                "용접시작일자": t("용접시작일자"),
+                "용접시작시간": t("용접시작시간"),
+                "용접완료일자": t("용접완료일자"),
+                "용접완료시간": t("용접완료시간"),
             },
         )
 
     if msg := st.session_state.pop("joint_table_msg", None):
-        st.success(msg)
+        st.success(t(msg))
     if msg := st.session_state.pop("joint_table_error", None):
-        st.error(msg)
+        st.error(t(msg))
 
     states_by_id = {row["_doc_id"]: row for row in joint_states}
-    if st.button("SPOOL / JOINT 수정 저장", type="primary", key="save_joint_table_edits"):
+    if st.button(t("SPOOL / JOINT 수정 저장"), type="primary", key="save_joint_table_edits"):
         saved = 0
         errors = []
         for _, edited in edited_table.iterrows():
@@ -1144,24 +1600,27 @@ def list_page():
         for row in joint_states
     }
     selected_delete_ids = edited_table.loc[edited_table["삭제 선택"], "_doc_id"].tolist()
-    if st.button("🗑️ 선택한 JOINT와 전체 이력 삭제", disabled=not selected_delete_ids, type="secondary"):
+    if st.button(t("🗑️ 선택한 JOINT와 전체 이력 삭제"), disabled=not selected_delete_ids, type="secondary"):
         st.session_state.delete_joint_pending = list(selected_delete_ids)
         st.rerun()
     if msg := st.session_state.pop("delete_joint_msg", None):
-        st.success(msg)
+        st.success(t(msg))
     if pending := st.session_state.get("delete_joint_pending"):
         confirm_joint_delete(pending, labels)
 
-    with st.expander("작업 이력 상세 · 진행률 입력 기록"):
+    with st.expander(t("작업 이력 상세 · 진행률 입력 기록")):
+        history_view = history_shown[["상태", "직반", "작업자", "프로젝트번호", "SPOOL_NO", "JOINT_NO", "누계 진행률(%)", "당일 진행률(%)",
+                                      "용접시작일자", "용접시작시간", "일시정지일자", "일시정지시간", "용접완료일자", "용접완료시간",
+                                      "소요시간(분)", "JOINT 누적(분)"]].copy()
+        history_view["상태"] = history_view["상태"].map(t)
+        history_view.columns = [t(column) for column in history_view.columns]
         st.dataframe(
-            history_shown[["상태", "직반", "작업자", "프로젝트번호", "SPOOL_NO", "JOINT_NO", "누계 진행률(%)", "당일 진행률(%)",
-                           "용접시작일자", "용접시작시간", "일시정지일자", "일시정지시간", "용접완료일자", "용접완료시간",
-                           "소요시간(분)", "JOINT 누적(분)"]],
+            history_view,
             hide_index=True,
             width="stretch",
             column_config={
-                "누계 진행률(%)": st.column_config.NumberColumn(format="%d%%"),
-                "당일 진행률(%)": st.column_config.NumberColumn(format="%d%%"),
+                t("누계 진행률(%)"): st.column_config.NumberColumn(format="%d%%"),
+                t("당일 진행률(%)"): st.column_config.NumberColumn(format="%d%%"),
             },
         )
 
@@ -1170,41 +1629,142 @@ def list_page():
     all_export = all_export.sort_values("_sort_start", ascending=False, kind="stable").drop(
         columns="_sort_start"
     )
-    all_export = all_export.rename(
-        columns={"프로젝트번호": "프로젝트", "SPOOL_NO": "SPOOL NO", "JOINT_NO": "JOINT NO"}
-    )
+    all_export["상태"] = all_export["상태"].map(t)
+    all_export = all_export.rename(columns={column: t(column) for column in all_export.columns})
 
     stamp = now().strftime("%Y%m%d_%H%M")
-    st.subheader("다운로드")
+    st.subheader(t("다운로드"))
     all_filename = f"welding_status_{stamp}.xlsx"
     all_data = to_excel(all_export)
 
     st.download_button(
-        "📥 전체 데이터 Excel",
+        f"📥 {t('전체 데이터 Excel')}",
         all_data,
         file_name=all_filename,
         mime=XLSX_MIME,
         width="stretch",
     )
 
-    st.subheader("이메일로 보내기")
+    st.subheader(t("이메일로 보내기"))
     email_recipient = st.text_input(
-        "받는 이메일 주소",
+        t("받는 이메일 주소"),
         key="email_recipient",
         placeholder="name@example.com",
     ).strip()
-    send_all = st.button("📧 전체 Excel 보내기", width="stretch", key="send_all_email")
+    send_all = st.button(f"📧 {t('전체 Excel 보내기')}", width="stretch", key="send_all_email")
 
     if send_all:
         if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email_recipient):
-            st.error("올바른 이메일 주소를 입력하세요.")
+            st.error(t("올바른 이메일 주소를 입력하세요."))
         else:
             try:
                 send_excel_email(email_recipient, all_filename, all_data)
             except ValueError as exc:
-                st.error(str(exc))
+                st.error(t(str(exc)))
             else:
-                st.success(f"{email_recipient} 주소로 Excel 파일을 보냈습니다.")
+                st.success(t(f"{email_recipient} 주소로 Excel 파일을 보냈습니다."))
+
+
+def account_page():
+    if not is_admin():
+        st.switch_page(PAGES["start"])
+    nav_bar("accounts")
+    st.title(t("계정관리"))
+
+    st.subheader(t("계정 추가"))
+    with st.form("add_worker_account_form", clear_on_submit=True):
+        new_name = st.text_input(t("이름 / 로그인 ID"))
+        new_team = st.selectbox(t("직반"), list(BASE_WORKERS), format_func=t)
+        new_password = st.text_input(t("비밀번호 (비워두면 직반 번호)"), type="password")
+        add_account = st.form_submit_button(t("계정 저장"), type="primary", width="stretch")
+    if add_account:
+        initial_password = new_password or "".join(char for char in new_team if char.isdigit())
+        try:
+            create_managed_account(new_name, new_team, initial_password)
+        except ValueError as exc:
+            st.error(t(str(exc)))
+        else:
+            st.session_state.account_notice = (
+                f"{t('계정 추가')}: {new_name} · {t('초기 비밀번호')}: {initial_password}"
+            )
+            refresh_worker_roster()
+            st.rerun()
+    if notice := st.session_state.pop("account_notice", None):
+        st.success(t(notice))
+
+    st.subheader(t("계정 목록"))
+    accounts = managed_accounts()
+    overrides = {account["login_id"]: account for account in accounts}
+    rows = [
+        {"ID": "admin", "이름": t("관리자"), "직반": "—", "계정 유형": t("관리자"), "상태": t("활성")}
+    ]
+    legacy_ids = {*WORKER_ACCOUNTS, *SPECIAL_ACCOUNTS}
+    rows.extend(
+        {
+            "ID": login_id, "이름": login_id, "직반": t(account["team"]),
+            "계정 유형": t("작업자"),
+            "상태": t("활성") if overrides.get(login_id, {}).get("active", True) else t("비활성"),
+        }
+        for login_id, account in WORKER_ACCOUNTS.items()
+    )
+    rows.extend(
+        {
+            "ID": login_id, "이름": login_id, "직반": t(account["team"]),
+            "계정 유형": t("팀 관리자"),
+            "상태": t("활성") if overrides.get(login_id, {}).get("active", True) else t("비활성"),
+        }
+        for login_id, account in SPECIAL_ACCOUNTS.items()
+    )
+    rows.extend(
+        {
+            "ID": account["login_id"], "이름": account.get("name", account["login_id"]),
+            "직반": t(account.get("team", "")), "계정 유형": t("작업자"),
+            "상태": t("활성") if account.get("active", True) else t("비활성"),
+        }
+        for account in accounts
+        if account["login_id"] not in legacy_ids
+    )
+    account_table = pd.DataFrame(rows).rename(columns={
+        "이름": t("이름"), "직반": t("직반"), "계정 유형": t("계정 유형"), "상태": t("상태"),
+    })
+    st.dataframe(account_table, hide_index=True, width="stretch")
+
+    st.subheader(t("계정 설정"))
+    by_id = {account["login_id"]: account for account in accounts}
+    for login_id, account in WORKER_ACCOUNTS.items():
+        by_id.setdefault(login_id, {
+            "login_id": login_id, "name": login_id, "team": account["team"],
+            "role": "worker", "active": True,
+        })
+    for login_id, account in SPECIAL_ACCOUNTS.items():
+        by_id.setdefault(login_id, {
+            "login_id": login_id, "name": login_id, "team": account["team"],
+            "role": "team_admin", "active": True,
+        })
+    selected_id = st.selectbox(t("계정 선택"), list(by_id), key="manage_account_select")
+    selected = by_id[selected_id]
+    st.caption(f"{t(selected.get('team', ''))} · {t('활성') if selected.get('active', True) else t('비활성')}")
+
+    with st.form("reset_worker_password_form", clear_on_submit=True):
+        replacement_password = st.text_input(t("새 비밀번호"), type="password")
+        reset_password = st.form_submit_button(t("비밀번호 재설정"), width="stretch")
+    if reset_password:
+        if len(replacement_password) < 2:
+            st.error(t("비밀번호는 2자 이상 입력하세요."))
+        else:
+            salt = py_secrets.token_hex(16)
+            update_managed_account(selected_id, {
+                "password_salt": salt,
+                "password_hash": _password_digest(replacement_password, salt),
+            })
+            st.success(t("비밀번호를 재설정했습니다."))
+
+    is_active = selected.get("active", True)
+    action = "계정 비활성화" if is_active else "계정 활성화"
+    if st.button(t(action), key="toggle_managed_account", width="stretch"):
+        update_managed_account(selected_id, {"active": not is_active})
+        refresh_worker_roster()
+        st.rerun()
 
 # ---------------------------------------------------------------- app ----
 if not st.session_state.get("current_user"):
@@ -1212,17 +1772,27 @@ if not st.session_state.get("current_user"):
     st.stop()
 
 get_db()
+refresh_worker_roster()
 user = current_user()
+if user["role"] != "admin":
+    active_account = _managed_account_doc(user["name"]).get()
+    account_data = active_account.to_dict() or {} if active_account.exists else {}
+    if active_account.exists and not account_data.get("active", True):
+        st.session_state.pop("current_user", None)
+        st.rerun()
 landing_page = "start"
 if user["role"] == "worker" and active_segments(user["team"], user["name"]):
     landing_page = "finish"
 
 PAGES = {
-    "start": st.Page(start_page, title="용접시작", icon="🔥", default=landing_page == "start"),
-    "finish": st.Page(finish_page, title="용접완료", icon="✅", url_path="finish", default=landing_page == "finish"),
-    "list": st.Page(list_page, title="용접목록", icon="📋", url_path="list"),
+    "start": st.Page(start_page, title=t("용접시작"), icon="🔥", default=landing_page == "start"),
+    "finish": st.Page(finish_page, title=t("용접완료"), icon="✅", url_path="finish", default=landing_page == "finish"),
+    "list": st.Page(list_page, title=t("용접목록"), icon="📋", url_path="list"),
+    "accounts": st.Page(account_page, title=t("계정관리"), icon="👥", url_path="accounts"),
 }
 available_pages = [PAGES["start"], PAGES["finish"]]
 if can_manage_team():
     available_pages.append(PAGES["list"])
+if is_admin():
+    available_pages.append(PAGES["accounts"])
 st.navigation(available_pages, position="hidden").run()
