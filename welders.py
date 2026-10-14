@@ -46,14 +46,14 @@ INDONESIAN = {
     "용접목록": "Daftar Pengelasan",
     "계정관리": "Kelola Akun",
     "이름": "Nama",
-    "직반": "Tim",
+    "직반": "직반",
     "이름을 선택하세요": "Pilih nama",
     "직반을 선택하세요": "Pilih tim",
     "직접입력": "Input manual",
-    "1직1반": "Shift 1 - Tim 1",
-    "1직2반": "Shift 1 - Tim 2",
-    "1직3반": "Shift 1 - Tim 3",
-    "1직4반": "Shift 1 - Tim 4",
+    "1직1반": "1직1반",
+    "1직2반": "1직2반",
+    "1직3반": "1직3반",
+    "1직4반": "1직4반",
     "프로젝트": "Proyek",
     "프로젝트 직접 입력": "Masukkan proyek",
     "프로젝트 번호 입력": "Masukkan nomor proyek",
@@ -70,6 +70,7 @@ INDONESIAN = {
     "일시정지": "Dijeda",
     "일시정지 목록": "Daftar JOINT dijeda",
     "완료": "Selesai",
+    "완료된 JOINT는 작업자가 수정할 수 없습니다.": "Pekerja tidak dapat mengubah JOINT yang sudah selesai.",
     "취소": "Dibatalkan",
     "작업자": "Pekerja",
     "프로젝트번호": "Proyek",
@@ -211,7 +212,7 @@ INDONESIAN = {
     "이미 등록된 ID입니다.": "ID ini sudah terdaftar.",
     "계정을 찾을 수 없습니다. 새로고침 후 다시 시도하세요.": "Akun tidak ditemukan. Muat ulang dan coba lagi.",
     "비밀번호": "Kata sandi",
-    "직반": "Tim",
+    "직반": "직반",
     "이름": "Nama",
     "작업자": "Pekerja",
     "SPOOL NO": "SPOOL NO",
@@ -624,7 +625,7 @@ def _cancel_tx(tx, jref, lref, seg_id: int):
     tx.update(jref, {"상태": CANCELED, "base_progress": 0})
 
 @firestore.transactional
-def _rename_joint_tx(tx, old_ref, new_ref, log_refs, old_key, expected_state_id, updates):
+def _rename_joint_tx(tx, old_ref, new_ref, log_refs, old_key, expected_state_id, updates, worker_edit=False):
     current_snap = old_ref.get(transaction=tx)
     target_snap = new_ref.get(transaction=tx) if old_ref.id != new_ref.id else current_snap
     log_snaps = [ref.get(transaction=tx) for ref in log_refs]
@@ -635,6 +636,8 @@ def _rename_joint_tx(tx, old_ref, new_ref, log_refs, old_key, expected_state_id,
         or current.get("id") != expected_state_id
     ):
         raise JointTaken("이 JOINT 정보가 다른 작업에서 변경되었습니다. 새로고침 후 다시 시도하세요.")
+    if worker_edit and current.get("상태") == DONE:
+        raise JointTaken("완료된 JOINT는 작업자가 수정할 수 없습니다.")
     if old_ref.id != new_ref.id and target_snap.exists:
         raise JointTaken("수정하려는 SPOOL/JOINT 번호가 이미 등록되어 있습니다.")
     for snap in log_snaps:
@@ -693,6 +696,9 @@ def rename_joint(rec: dict, spool: str, joint: str):
         raise ValueError("이 JOINT를 수정할 권한이 없습니다.")
     if not can_manage_team() and current_user()["role"] != "worker":
         raise ValueError("이 JOINT를 수정할 권한이 없습니다.")
+    worker_edit = current_user()["role"] == "worker"
+    if worker_edit and rec.get("상태") == DONE:
+        raise ValueError("완료된 JOINT는 작업자가 수정할 수 없습니다.")
     spool, joint = spool.strip().upper(), joint.strip().upper()
     if not spool or not joint:
         raise ValueError("SPOOL NO와 JOINT NO를 모두 입력하세요.")
@@ -707,7 +713,8 @@ def rename_joint(rec: dict, spool: str, joint: str):
         raise ValueError("이 JOINT의 이력이 너무 많아 한 번에 수정할 수 없습니다. 관리자에게 문의하세요.")
     try:
         _rename_joint_tx(
-            get_db().transaction(), old_ref, new_ref, logs, joint_key(rec), rec.get("id"), updates
+            get_db().transaction(), old_ref, new_ref, logs, joint_key(rec), rec.get("id"), updates,
+            worker_edit=worker_edit,
         )
     except JointTaken as exc:
         raise ValueError(str(exc)) from exc
@@ -985,7 +992,9 @@ def own_joint_correction():
     user = current_user()
     rows = [
         row for row in load_joint_states()
-        if row.get("직반") == user.get("team") and row.get("작업자") == user.get("name")
+        if row.get("직반") == user.get("team")
+        and row.get("작업자") == user.get("name")
+        and row.get("상태") != DONE
     ]
     rows.sort(
         key=lambda row: (
