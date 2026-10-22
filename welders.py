@@ -166,6 +166,8 @@ INDONESIAN = {
     "이미 일시정지 또는 완료 처리된 JOINT입니다.": "JOINT ini sudah dijeda atau diselesaikan.",
     "일시정지 진행률은 최대 90%입니다. 100% 완료는 용접완료 버튼으로 등록하세요.":
         "Progres jeda maksimal 90%. Catat 100% melalui tombol Selesai Pengelasan.",
+    "일시정지 진행률은 최소 10%입니다.":
+        "Progres jeda minimal 10%.",
     "선택:": "Dipilih:",
     "표의 JOINT 상태가 변경되었습니다. 새로고침 후 다시 시도하세요.":
         "Status JOINT pada tabel telah berubah. Muat ulang dan coba lagi.",
@@ -1320,6 +1322,12 @@ def start_page():
 
 # ------------------------------------------------------- 용접완료 page ----
 def end_segment(rec: dict, ts: datetime, status: str, progress: int):
+    if status == PAUSED and progress < 10:
+        st.session_state.finish_msg = (
+            "error",
+            t("일시정지 진행률은 최소 10%입니다."),
+        )
+        return
     if status == PAUSED and progress > 90:
         st.session_state.finish_msg = (
             "error",
@@ -1369,8 +1377,10 @@ def pause_dialog(rec: dict, min_progress: int, ts: datetime):
     elif min_progress == 90:
         progress = 90
     else:
+        minimum_pause_progress = max(min_progress, 10)
         progress = st.slider(
-            t("진행률"), min_value=min_progress, max_value=90, value=min_progress, step=10, format="%d%%"
+            t("진행률"), min_value=minimum_pause_progress, max_value=90,
+            value=minimum_pause_progress, step=10, format="%d%%"
         )
     st.write(t("이 시각으로 일시정지를 등록하시겠습니까?"))
     yes, no = yes_no()
