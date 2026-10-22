@@ -238,6 +238,10 @@ INDONESIAN = {
     "용접완료시간": "Waktu selesai",
     "일시정지일자": "Tanggal jeda",
     "일시정지시간": "Waktu jeda",
+    "자동중지": "Jeda otomatis",
+    "21시 자동중지": "Jeda otomatis pukul 21.00",
+    "21시 자동중지된 작업이 있습니다. 진행률과 기록을 확인하세요.":
+        "Ada pekerjaan yang dijeda otomatis pukul 21.00. Periksa progres dan catatannya.",
     "내용": "Detail",
     "당일 진행률(%)": "Progres hari ini (%)",
     "누계 진행률(%)": "Progres kumulatif (%)",
@@ -319,7 +323,8 @@ ACTIVE, PAUSED, DONE, CANCELED = "진행중", "일시정지", "완료", "취소"
 INPUT_MODE = "직접입력"  
 JOINT_COLS = ("프로젝트번호", "SPOOL_NO", "TAG_NO", "JOINT_NO")
 LOG_COLUMNS = ["id", "직반", "작업자", "프로젝트번호", "입력방식", "SPOOL_NO", "TAG_NO", "JOINT_NO", "상태", "진행률",
-               "용접시작일자", "용접시작시간", "일시정지일자", "일시정지시간", "용접완료일자", "용접완료시간"]
+               "용접시작일자", "용접시작시간", "일시정지일자", "일시정지시간", "용접완료일자", "용접완료시간",
+               "자동중지"]
 
 st.set_page_config(page_title="용접 실적 입력", page_icon="🔥", layout="centered")
 
@@ -668,6 +673,49 @@ def _end_tx(tx, jref, lref, seg_id: int, changes: dict, base: int):
     tx.update(lref, changes)
     tx.update(jref, {**changes, "base_progress": base})
 
+
+def auto_pause_overdue_work() -> int:
+    """Pause active joints at 21:00 KST when this app next receives a request."""
+    current_time = now()
+    paused_count = 0
+    for record in _active_all():
+        try:
+            started = datetime.strptime(
+                f"{record['용접시작일자']} {record['용접시작시간']}", "%Y-%m-%d %H:%M:%S"
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        deadline = started.replace(hour=21, minute=0, second=0, microsecond=0)
+        stop_at = max(started, deadline)
+        if current_time < stop_at:
+            continue
+
+        try:
+            progress = int(record.get("base_progress") or 0)
+        except (TypeError, ValueError):
+            progress = 0
+        progress = max(0, min(progress, 90))
+        pause_date, pause_time = fmt(stop_at)
+        changes = {
+            "상태": PAUSED,
+            "진행률": progress,
+            "일시정지일자": pause_date,
+            "일시정지시간": pause_time,
+            "자동중지": True,
+        }
+        try:
+            _end_tx(
+                get_db().transaction(), joint_ref(record), log_ref(record["id"]),
+                record["id"], changes, progress,
+            )
+        except JointTaken:
+            continue
+        paused_count += 1
+
+    if paused_count:
+        clear_cache()
+    return paused_count
+
 @firestore.transactional
 def _cancel_tx(tx, jref, lref, seg_id: int):
     cur = jref.get(transaction=tx).to_dict()
@@ -848,6 +896,17 @@ def worker_activity_notice(user: dict):
         )
     else:
         st.caption(t("현재 진행 중인 JOINT가 없습니다."))
+    auto_paused = [
+        row for row in paused_joints()
+        if row.get("직반") in set(user_teams(user))
+        and row.get("작업자") == user["name"]
+        and row.get("자동중지")
+    ]
+    if auto_paused:
+        st.warning(
+            f"{t('21시 자동중지된 작업이 있습니다. 진행률과 기록을 확인하세요.')} "
+            f"({len(auto_paused)}건)"
+        )
     if rows and now().time() >= datetime_time(17, 0):
         st.warning(t("17시가 지났습니다. 진행 중인 작업을 일시정지하거나 완료해 주세요."))
         if st.button(t("용접완료 페이지로 이동"), type="primary", key="worker_after_17_finish"):
@@ -1180,6 +1239,7 @@ def paused_section(me: tuple[str, str] | None):
             t("JOINT NO"): r["JOINT_NO"],
             t("진행률"): r["진행률"] or 0,
             t("직반"): r["직반"],
+            t("자동중지"): t("21시 자동중지") if r.get("자동중지") else "",
             t("일시정지"): f"{r['일시정지일자']} {r['일시정지시간']}",
             t("프로젝트"): r["프로젝트번호"],
         }
@@ -1268,7 +1328,7 @@ def end_segment(rec: dict, ts: datetime, status: str, progress: int):
         return
     date, time = fmt(ts)
     date_col, time_col = ("일시정지일자", "일시정지시간") if status == PAUSED else ("용접완료일자", "용접완료시간")
-    changes = {"상태": status, "진행률": progress, date_col: date, time_col: time}
+    changes = {"상태": status, "진행률": progress, "자동중지": False, date_col: date, time_col: time}
     try:
         _end_tx(get_db().transaction(), joint_ref(rec), log_ref(rec["id"]), rec["id"], changes, progress)
     except JointTaken:
@@ -1532,6 +1592,7 @@ def list_page():
         summary_rows.append({
             "_doc_id": row["_doc_id"],
             "상태": state,
+            "자동중지": t("21시 자동중지") if row.get("자동중지") else "",
             "직반": row.get("직반", ""),
             "작업자": row.get("작업자", ""),
             "프로젝트번호": row.get("프로젝트번호", ""),
@@ -1555,8 +1616,6 @@ def list_page():
         errors="coerce",
     )
     today = now().date()
-    recent_start = today - timedelta(days=2)
-
     with st.expander(t("필터"), expanded=False):
         if is_admin():
             c1, c2 = st.columns(2)
@@ -1574,14 +1633,12 @@ def list_page():
             scoped_names = summary_df if team == "전체" else summary_df[summary_df["직반"] == team]
             names = sorted(scoped_names["작업자"].unique())
             name = c2.selectbox(t("이름"), ["전체", *names], format_func=t, key=f"l_name_{team}")
-        status = st.radio(t("상태"), ["전체", ACTIVE, PAUSED, DONE, CANCELED], format_func=t, horizontal=True, key="l_status")
-        valid_start = summary_start.dropna()
-        first, last = (
-            (valid_start.min().date(), valid_start.max().date())
-            if not valid_start.empty else (start.min().date(), start.max().date())
+        statuses = st.multiselect(
+            t("상태"), ["전체", ACTIVE, PAUSED, DONE, CANCELED],
+            default=[ACTIVE, PAUSED], format_func=t, key="l_statuses_today_default",
         )
-        default_period = (recent_start, today) if (is_team_admin() or is_guest()) else (first, last)
-        period = st.date_input(t("용접시작일자 기간"), default_period, key="l_period")
+        default_period = (today, today)
+        period = st.date_input(t("용접시작일자 기간"), default_period, key="l_period_today_default")
         search = st.text_input(t("SPOOL / JOINT 검색"), key="l_search").strip().lower()
 
     mask = pd.Series(True, index=df.index)
@@ -1589,8 +1646,8 @@ def list_page():
         mask &= df["직반"] == team
     if name != "전체":
         mask &= df["작업자"] == name
-    if status != "전체":
-        mask &= df["상태"] == status
+    if "전체" not in statuses:
+        mask &= df["상태"].isin(statuses)
     if isinstance(period, tuple) and len(period) == 2:
         mask &= start.dt.date.between(period[0], period[1])
     if search:
@@ -1604,13 +1661,10 @@ def list_page():
         summary_mask &= summary_df["직반"] == team
     if name != "전체":
         summary_mask &= summary_df["작업자"] == name
-    if status != "전체":
-        summary_mask &= summary_df["상태"] == status
+    if "전체" not in statuses:
+        summary_mask &= summary_df["상태"].isin(statuses)
     if isinstance(period, tuple) and len(period) == 2:
-        date_mask = summary_start.dt.date.between(period[0], period[1])
-        if (is_team_admin() or is_guest()) and period == default_period:
-            date_mask |= summary_df["상태"].isin([ACTIVE, PAUSED])
-        summary_mask &= date_mask
+        summary_mask &= summary_start.dt.date.between(period[0], period[1])
     if search:
         summary_mask &= summary_df[["SPOOL_NO", "JOINT_NO"]].apply(
             lambda column: column.astype(str).str.lower().str.contains(search, regex=False)
@@ -1627,7 +1681,7 @@ def list_page():
         st.metric(t("일시정지"), f"{(shown_summary['상태'] == PAUSED).sum():,}")
         st.metric(t("완료"), f"{(shown_summary['상태'] == DONE).sum():,}")
 
-    summary_columns = ["상태", "작업자", "프로젝트번호", "SPOOL_NO", "JOINT_NO", "누계 진행률(%)",
+    summary_columns = ["상태", "자동중지", "작업자", "프로젝트번호", "SPOOL_NO", "JOINT_NO", "누계 진행률(%)",
                        "JOINT 누적(분)", "직반", "용접시작일자", "용접시작시간", "용접완료일자", "용접완료시간"]
     st.subheader(t("용접현황"))
     table_rows = shown_summary[["_doc_id", *summary_columns]].copy().reset_index(drop=True)
@@ -1666,11 +1720,12 @@ def list_page():
             row_height=35,
             num_rows="fixed",
             key="joint_status_editor",
-            disabled=["_doc_id", "상태", "직반", "작업자", "프로젝트번호", "누계 진행률(%)",
+            disabled=["_doc_id", "상태", "자동중지", "직반", "작업자", "프로젝트번호", "누계 진행률(%)",
                       "JOINT 누적(분)", "용접시작일자", "용접시작시간", "용접완료일자", "용접완료시간"],
             column_config={
                 "_doc_id": None,
                 "상태": t("상태"),
+                "자동중지": t("자동중지"),
                 "작업자": t("작업자"),
                 "직반": t("직반"),
                 "프로젝트번호": t("프로젝트"),
@@ -1738,9 +1793,12 @@ def list_page():
             confirm_joint_delete(pending, labels)
 
     with st.expander(t("작업 이력 상세 · 진행률 입력 기록")):
-        history_view = history_shown[["상태", "직반", "작업자", "프로젝트번호", "SPOOL_NO", "JOINT_NO", "누계 진행률(%)", "당일 진행률(%)",
+        history_view = history_shown[["상태", "자동중지", "직반", "작업자", "프로젝트번호", "SPOOL_NO", "JOINT_NO", "누계 진행률(%)", "당일 진행률(%)",
                                       "용접시작일자", "용접시작시간", "일시정지일자", "일시정지시간", "용접완료일자", "용접완료시간",
                                       "소요시간(분)", "JOINT 누적(분)"]].copy()
+        history_view["자동중지"] = history_view["자동중지"].map(
+            lambda value: t("21시 자동중지") if pd.notna(value) and bool(value) else ""
+        )
         history_view["상태"] = history_view["상태"].map(t)
         history_view.columns = [t(column) for column in history_view.columns]
         st.dataframe(
@@ -1960,6 +2018,15 @@ if user["role"] != "admin":
             "teams": updated_teams,
         })
         user = current_user()
+@st.fragment(run_every="60s")
+def night_autopause_monitor():
+    # Keep checking while this app session is open, even if nobody interacts.
+    if now().time() >= datetime_time(21, 0) and auto_pause_overdue_work():
+        # Refresh the page so the auto-pause and its marker appear immediately.
+        st.rerun()
+
+
+night_autopause_monitor()
 landing_page = "start"
 if is_guest():
     landing_page = "list"
