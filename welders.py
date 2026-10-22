@@ -4,7 +4,7 @@ import re
 import secrets as py_secrets
 import smtplib
 import ssl
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as datetime_time
 from email.message import EmailMessage
 from io import BytesIO
 from time import time_ns
@@ -119,6 +119,7 @@ INDONESIAN = {
     "이 시각으로 용접완료를 등록하시겠습니까?": "Apakah selesai pengelasan akan dicatat pada waktu ini?",
     "이 시각으로 일시정지를 등록하시겠습니까?": "Apakah jeda akan dicatat pada waktu ini?",
     "이름 / 로그인 ID": "Nama / ID login",
+    "비밀번호 (비워두면 첫 직반 번호)": "Kata sandi (kosong memakai kode tim pertama)",
     "비밀번호 (비워두면 직반 번호)": "Kata sandi (kosongkan untuk memakai kode tim)",
     "초기 비밀번호": "Kata sandi awal",
     "계정 추가": "Tambah akun",
@@ -136,6 +137,20 @@ INDONESIAN = {
     "저장된 작업 기록이 없습니다.": "Belum ada riwayat kerja tersimpan.",
     "계정 선택": "Pilih akun",
     "계정 유형": "Jenis akun",
+    "계정 유형 선택": "Pilih jenis akun",
+    "반장님": "Admin tim",
+    "용접사": "Pekerja",
+    "게스트": "Tamu",
+    "보기 전용": "Hanya lihat",
+    "여러 직반 선택 가능": "Pilih satu atau beberapa tim",
+    "권한 직반": "Tim yang dapat diakses",
+    "권한 저장": "Simpan akses",
+    "현재 진행중": "Sedang dikerjakan sekarang",
+    "현재 진행 중인 JOINT가 없습니다.": "Tidak ada JOINT yang sedang dikerjakan.",
+    "17시가 지났습니다. 진행 중인 작업을 일시정지하거나 완료해 주세요.":
+        "Sudah lewat pukul 17.00. Jeda atau selesaikan pekerjaan yang sedang berlangsung.",
+    "용접완료 페이지로 이동": "Buka halaman Selesai Pengelasan",
+    "게스트 계정은 데이터 조회만 가능합니다.": "Akun tamu hanya dapat melihat data.",
     "관리자 로그인을 사용하려면 Streamlit Secrets에 [auth] admin_password를 설정하세요.":
         "Untuk login admin, atur [auth] admin_password di Streamlit Secrets.",
     "언어 / Bahasa": "Bahasa",
@@ -352,30 +367,29 @@ def authenticate(login_id: str, password: str) -> dict | None:
             return None
         if account.get("password_hash"):
             if _check_account_password(account, password):
+                teams = account_teams(account)
                 return {
                     "role": role,
                     "name": account.get("name", login_id),
-                    "team": account.get("team", ""),
+                    "team": teams[0] if teams else "",
+                    "teams": teams,
                     "managed": True,
                 }
             return None
-        if role == "worker":
-            builtin = WORKER_ACCOUNTS.get(login_id)
-            if builtin and hmac.compare_digest(password, builtin["password"]):
-                return {"role": "worker", "name": login_id, "team": account.get("team", builtin["team"])}
-        elif role == "team_admin":
-            builtin = SPECIAL_ACCOUNTS.get(login_id)
-            if builtin and hmac.compare_digest(password, builtin["password"]):
-                return {"role": "team_admin", "name": login_id, "team": account.get("team", builtin["team"])}
+        builtin = WORKER_ACCOUNTS.get(login_id) or SPECIAL_ACCOUNTS.get(login_id)
+        if role in {"worker", "team_admin", "guest"} and builtin:
+            if hmac.compare_digest(password, builtin["password"]):
+                teams = account_teams(account) or [builtin["team"]]
+                return {"role": role, "name": login_id, "team": teams[0], "teams": teams}
         return None
 
     special_account = SPECIAL_ACCOUNTS.get(login_id)
     if special_account and hmac.compare_digest(password, special_account["password"]):
-        return {"role": "team_admin", "name": login_id, "team": special_account["team"]}
+        return {"role": "team_admin", "name": login_id, "team": special_account["team"], "teams": [special_account["team"]]}
 
     account = WORKER_ACCOUNTS.get(login_id)
     if account and hmac.compare_digest(password, account["password"]):
-        return {"role": "worker", "name": login_id, "team": account["team"]}
+        return {"role": "worker", "name": login_id, "team": account["team"], "teams": [account["team"]]}
     return None
 
 
@@ -410,6 +424,33 @@ def is_team_admin() -> bool:
     return current_user()["role"] == "team_admin"
 
 
+def is_guest() -> bool:
+    return current_user()["role"] == "guest"
+
+
+def account_teams(account: dict | None) -> list[str]:
+    if not account:
+        return []
+    teams = account.get("teams")
+    if isinstance(teams, str):
+        teams = [teams]
+    if not teams:
+        legacy_team = account.get("team")
+        teams = [legacy_team] if legacy_team else []
+    return list(dict.fromkeys(team for team in teams if team in BASE_WORKERS))
+
+
+def user_teams(user: dict | None = None) -> list[str]:
+    user = user or current_user()
+    if user.get("role") == "admin":
+        return list(BASE_WORKERS)
+    return account_teams(user)
+
+
+def can_view_list() -> bool:
+    return can_manage_team() or is_guest()
+
+
 def can_manage_team() -> bool:
     return is_admin() or is_team_admin()
 
@@ -418,9 +459,12 @@ def can_access_record(team: str, name: str) -> bool:
     user = current_user()
     if user["role"] == "admin":
         return True
+    teams = user_teams(user)
     if user["role"] == "team_admin":
-        return team == user["team"]
-    return team == user["team"] and name == user["name"]
+        return team in teams
+    if user["role"] == "worker":
+        return team in teams and name == user["name"]
+    return False
 
 
 # ------------------------------------------------------------ database ----
@@ -464,6 +508,7 @@ def _managed_account_doc(login_id: str):
     return get_db().collection(ACCOUNT_COLLECTION).document(login_id)
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def managed_accounts() -> list[dict]:
     rows = []
     for snapshot in get_db().collection(ACCOUNT_COLLECTION).stream():
@@ -485,19 +530,22 @@ def refresh_worker_roster():
     })
     for account in account_rows:
         if account.get("role") == "worker" and account.get("active", True):
-            team, name = account.get("team"), account.get("name")
-            if team and name:
+            name = account.get("name")
+            for team in account_teams(account):
                 WORKERS.setdefault(team, [])
                 if name not in WORKERS[team]:
                     WORKERS[team].append(name)
 
 
-def create_managed_account(login_id: str, team: str, password: str):
+def create_managed_account(login_id: str, teams: list[str], role: str, password: str):
     login_id = login_id.strip()
     if not login_id or "/" in login_id or login_id in {"admin", *SPECIAL_ACCOUNTS}:
         raise ValueError("사용할 수 없는 ID입니다.")
-    if team not in BASE_WORKERS:
+    teams = list(dict.fromkeys(teams))
+    if not teams or any(team not in BASE_WORKERS for team in teams):
         raise ValueError("직반을 선택하세요.")
+    if role not in {"worker", "team_admin", "guest"}:
+        raise ValueError("계정 유형을 선택하세요.")
     if login_id in WORKER_ACCOUNTS or login_id in SPECIAL_ACCOUNTS:
         raise ValueError("이미 사용 중인 ID입니다.")
     ref = _managed_account_doc(login_id)
@@ -508,13 +556,15 @@ def create_managed_account(login_id: str, team: str, password: str):
     salt = py_secrets.token_hex(16)
     ref.set({
         "name": login_id,
-        "team": team,
-        "role": "worker",
+        "team": teams[0],
+        "teams": teams,
+        "role": role,
         "active": True,
         "password_salt": salt,
         "password_hash": _password_digest(password, salt),
         "created_at": now(),
     })
+    managed_accounts.clear()
 
 
 def update_managed_account(login_id: str, updates: dict):
@@ -536,6 +586,7 @@ def update_managed_account(login_id: str, updates: dict):
         ref.set({**base, **updates})
     else:
         ref.update(updates)
+    managed_accounts.clear()
 
 def now() -> datetime:
     return datetime.now(KST).replace(tzinfo=None)
@@ -573,12 +624,13 @@ def _active_all() -> list[dict]:
     rows.sort(key=lambda r: (r["용접시작일자"], r["용접시작시간"]))
     return rows
 
-def active_segments(team: str | None = None, name: str | None = None) -> list[dict]:
+def active_segments(team: str | list[str] | None = None, name: str | None = None) -> list[dict]:
     rows = _active_all()
+    teams = set(team) if isinstance(team, (list, tuple, set)) else ({team} if team else None)
     if name:
-        return [r for r in rows if r["직반"] == team and r["작업자"] == name]
-    if team:
-        return [r for r in rows if r["직반"] == team]
+        return [r for r in rows if (teams is None or r["직반"] in teams) and r["작업자"] == name]
+    if teams is not None:
+        return [r for r in rows if r["직반"] in teams]
     return rows
 
 def joint_progress(rec: dict) -> int:
@@ -725,7 +777,8 @@ def visible_joint_states() -> list[dict]:
     user = current_user()
     if is_admin():
         return rows
-    return [row for row in rows if row.get("직반") == user["team"]]
+    teams = set(user_teams(user))
+    return [row for row in rows if row.get("직반") in teams]
 
 def delete_joint_records(doc_ids: list[str]):
     states = {row["_doc_id"]: row for row in visible_joint_states()}
@@ -773,13 +826,44 @@ def confirm_joint_delete(doc_ids: list[str], labels: dict[str, str]):
         st.rerun()
 
 # ---------------------------------------------------------------- shared ----
+def worker_activity_notice(user: dict):
+    if user.get("role") != "worker":
+        return
+    rows = active_segments(user_teams(user), user["name"])
+    st.info(f"🔧 {t('현재 진행중')} · {len(rows)}건")
+    if rows:
+        st.dataframe(
+            pd.DataFrame(
+                {
+                    t("직반"): row.get("직반", ""),
+                    t("프로젝트"): row.get("프로젝트번호", ""),
+                    t("SPOOL NO"): row.get("SPOOL_NO", ""),
+                    t("JOINT NO"): row.get("JOINT_NO", ""),
+                }
+                for row in rows
+            ),
+            hide_index=True,
+            width="stretch",
+            height=min(240, 38 + 35 * len(rows)),
+        )
+    else:
+        st.caption(t("현재 진행 중인 JOINT가 없습니다."))
+    if rows and now().time() >= datetime_time(17, 0):
+        st.warning(t("17시가 지났습니다. 진행 중인 작업을 일시정지하거나 완료해 주세요."))
+        if st.button(t("용접완료 페이지로 이동"), type="primary", key="worker_after_17_finish"):
+            st.switch_page(PAGES["finish"])
+
+
 def nav_bar(current: str):
+    user = current_user()
+    worker_activity_notice(user)
     with st.container(horizontal=True, key="navbar"):
-        user = current_user()
-        nav_items = [("start", f"🔥 {t('용접시작')}")]
-        if can_manage_team() or active_segments(user["team"], user["name"]):
+        nav_items = []
+        if not is_guest():
+            nav_items.append(("start", f"🔥 {t('용접시작')}"))
+        if not is_guest() and (can_manage_team() or active_segments(user_teams(user), user["name"])):
             nav_items.append(("finish", f"✅ {t('용접완료')}"))
-        if can_manage_team():
+        if can_view_list():
             nav_items.append(("list", f"📋 {t('용접목록')}"))
         if is_admin():
             nav_items.append(("accounts", f"👥 {t('계정관리')}"))
@@ -794,7 +878,9 @@ def nav_bar(current: str):
     if is_admin():
         display_name = t("관리자")
     elif is_team_admin():
-        display_name = f"{t('팀 관리자')} · {t(user['team'])}"
+        display_name = f"{t('팀 관리자')} · {', '.join(t(team) for team in user_teams(user))}"
+    elif is_guest():
+        display_name = f"{t('게스트')} · {', '.join(t(team) for team in user_teams(user))}"
     else:
         display_name = f"{t(user['team'])} · {user['name']}"
     with st.container(horizontal=True):
@@ -928,7 +1014,7 @@ def start_controls(rec: dict, prev: dict | None, me: tuple[str, str] | None, key
             else:
                 if me and me != prev_worker and f"{key}_team" not in st.session_state:
                     st.session_state[f"{key}_team"], st.session_state[f"{key}_name"] = me
-                fixed_team = None if is_admin() else current_user()["team"]
+                fixed_team = None if is_admin() else prev_worker[0]
                 worker = pick_worker(key, exclude=prev_worker, fixed_team=fixed_team)
         elif prev_worker != me:
             st.error(t("다른 작업자의 JOINT에는 접근할 수 없습니다."))
@@ -990,9 +1076,10 @@ def start_search(me: tuple[str, str]):
 
 def own_joint_correction():
     user = current_user()
+    allowed_teams = set(user_teams(user))
     rows = [
         row for row in load_joint_states()
-        if row.get("직반") == user.get("team")
+        if row.get("직반") in allowed_teams
         and row.get("작업자") == user.get("name")
         and row.get("상태") != DONE
     ]
@@ -1076,7 +1163,8 @@ def paused_section(me: tuple[str, str] | None):
     rows = paused_joints()
     if not is_admin():
         if is_team_admin():
-            rows = [r for r in rows if r["직반"] == current_user()["team"]]
+            allowed_teams = set(user_teams())
+            rows = [r for r in rows if r["직반"] in allowed_teams]
         else:
             rows = [r for r in rows if (r["직반"], r["작업자"]) == me]
     st.subheader(f"⏸ {t('일시정지 목록')} ({len(rows)}건)")
@@ -1119,6 +1207,8 @@ def paused_section(me: tuple[str, str] | None):
     start_controls(rec, prev, me, key=f"c_p_{prev['id']}")
 
 def start_page():
+    if is_guest():
+        st.switch_page(PAGES["list"])
     nav_bar("start")
     if notice := st.session_state.pop("start_notice", None):
         (st.success if notice[0] == "success" else st.error)(t(notice[1]))
@@ -1132,7 +1222,7 @@ def start_page():
             f"{res['직반']} {res['작업자']} · {joint_label(res)}"
         ))
         user = current_user()
-        if user["role"] == "worker" and active_segments(user["team"], user["name"]):
+        if user["role"] == "worker" and active_segments(user_teams(user), user["name"]):
             st.switch_page(PAGES["finish"])
     if msg := st.session_state.pop("cancel_msg", None):
         (st.success if msg[0] == "success" else st.error)(t(msg[1]))
@@ -1144,11 +1234,18 @@ def start_page():
         team, name = pick_worker()
         me = (team, name) if name else None
     elif is_team_admin():
-        team = user["team"]
+        teams = user_teams(user)
+        team = teams[0] if len(teams) == 1 else st.selectbox(
+            t("직반"), teams, format_func=t, key="team_admin_start_team"
+        )
         _, name = pick_worker(fixed_team=team)
         me = (team, name) if name else None
     else:
-        team, name = user["team"], user["name"]
+        teams = user_teams(user)
+        team = teams[0] if len(teams) == 1 else st.selectbox(
+            t("직반"), teams, format_func=t, key="worker_start_team"
+        )
+        name = user["name"]
         me = (team, name)
     if me:
         if is_admin():
@@ -1223,7 +1320,7 @@ def pause_dialog(rec: dict, min_progress: int, ts: datetime):
     if no:
         st.rerun()
 
-def my_active_section(team: str, name: str):
+def my_active_section(team: str | list[str], name: str):
     records = {r["id"]: r for r in active_segments(team, name)}
     if not records:
         st.info(t("진행중인 JOINT가 없습니다."))
@@ -1249,9 +1346,15 @@ def my_active_section(team: str, name: str):
     if done:
         finish_dialog(records[rid], now())
 
-def active_list_section(me: tuple[str, str] | None = None, team_scope: str | None = None):
+def active_list_section(
+    me: tuple[str, str] | None = None,
+    team_scope: str | list[str] | None = None,
+    name_scope: str | None = None,
+):
     if me:
         rows = active_segments(*me)
+    elif name_scope:
+        rows = active_segments(team_scope, name_scope)
     else:
         rows = active_segments(team=team_scope)
     st.subheader(f"🔧 {t('진행중 목록')} ({len(rows)}건)")
@@ -1276,7 +1379,9 @@ def active_list_section(me: tuple[str, str] | None = None, team_scope: str | Non
 
 def finish_page():
     user = current_user()
-    if not can_manage_team() and not active_segments(user["team"], user["name"]):
+    if is_guest():
+        st.switch_page(PAGES["list"])
+    if not can_manage_team() and not active_segments(user_teams(user), user["name"]):
         if notice := st.session_state.pop("finish_msg", None):
             st.session_state.start_notice = notice
         st.switch_page(PAGES["start"])
@@ -1302,23 +1407,26 @@ def finish_page():
             remember_worker(*me)
             my_active_section(team, name)
     elif is_team_admin():
-        team = user["team"]
+        teams = user_teams(user)
+        team = teams[0] if len(teams) == 1 else st.selectbox(
+            t("직반"), teams, format_func=t, key="team_admin_finish_team"
+        )
         _, name = pick_worker(key="f", fixed_team=team)
         me = (team, name) if name else None
         if me:
             my_active_section(team, name)
     else:
-        team, name = user["team"], user["name"]
-        me = (team, name)
+        teams, name = user_teams(user), user["name"]
+        team = teams[0] if len(teams) == 1 else teams
         my_active_section(team, name)
 
     st.divider()
     if is_admin():
         active_list_section()
     elif is_team_admin():
-        active_list_section(team_scope=user["team"])
+        active_list_section(team_scope=user_teams(user))
     else:
-        active_list_section(me)
+        active_list_section(team_scope=user_teams(user), name_scope=user["name"])
 
 # ------------------------------------------------------- 용접목록 page ----
 def to_excel(df: pd.DataFrame) -> bytes:
@@ -1372,7 +1480,7 @@ def send_excel_email(recipient: str, filename: str, data: bytes):
         ) from exc
 
 def list_page():
-    if not can_manage_team():
+    if not can_view_list():
         st.switch_page(PAGES["start"])
     if st.session_state.pop("reset_joint_status_editor", False):
         st.session_state.pop("joint_status_editor", None)
@@ -1388,10 +1496,9 @@ def list_page():
     df = df.sort_values("id").reset_index(drop=True) 
     if not is_admin():
         user = current_user()
-        if is_team_admin():
-            df = df[df["직반"] == user["team"]].copy()
-        else:
-            df = df[(df["직반"] == user["team"]) & (df["작업자"] == user["name"])].copy()
+        df = df[df["직반"].isin(user_teams(user))].copy()
+        if user.get("role") == "worker":
+            df = df[df["작업자"] == user["name"]].copy()
         if df.empty:
             st.info(t("저장된 작업 기록이 없습니다."))
             return
@@ -1458,21 +1565,22 @@ def list_page():
                 summary_df.loc[summary_df["직반"] == team, "작업자"].unique()
             )
             name = c2.selectbox(t("이름"), ["전체", *names], format_func=t, key=f"l_name_{team}")
-        elif is_team_admin():
-            team = user["team"]
-            c1, c2 = st.columns(2)
-            c1.text_input(t("직반"), value=t(team), disabled=True)
-            names = sorted(summary_df.loc[summary_df["직반"] == team, "작업자"].unique())
-            name = c2.selectbox(t("이름"), ["전체", *names], format_func=t, key=f"l_name_{team}")
         else:
-            team, name = user["team"], user["name"]
+            allowed_teams = user_teams(user)
+            c1, c2 = st.columns(2)
+            team = c1.selectbox(
+                t("직반"), ["전체", *allowed_teams], format_func=t, key="l_team_scoped"
+            )
+            scoped_names = summary_df if team == "전체" else summary_df[summary_df["직반"] == team]
+            names = sorted(scoped_names["작업자"].unique())
+            name = c2.selectbox(t("이름"), ["전체", *names], format_func=t, key=f"l_name_{team}")
         status = st.radio(t("상태"), ["전체", ACTIVE, PAUSED, DONE, CANCELED], format_func=t, horizontal=True, key="l_status")
         valid_start = summary_start.dropna()
         first, last = (
             (valid_start.min().date(), valid_start.max().date())
             if not valid_start.empty else (start.min().date(), start.max().date())
         )
-        default_period = (recent_start, today) if is_team_admin() else (first, last)
+        default_period = (recent_start, today) if (is_team_admin() or is_guest()) else (first, last)
         period = st.date_input(t("용접시작일자 기간"), default_period, key="l_period")
         search = st.text_input(t("SPOOL / JOINT 검색"), key="l_search").strip().lower()
 
@@ -1500,7 +1608,7 @@ def list_page():
         summary_mask &= summary_df["상태"] == status
     if isinstance(period, tuple) and len(period) == 2:
         date_mask = summary_start.dt.date.between(period[0], period[1])
-        if is_team_admin() and period == default_period:
+        if (is_team_admin() or is_guest()) and period == default_period:
             date_mask |= summary_df["상태"].isin([ACTIVE, PAUSED])
         summary_mask &= date_mask
     if search:
@@ -1523,7 +1631,8 @@ def list_page():
                        "JOINT 누적(분)", "직반", "용접시작일자", "용접시작시간", "용접완료일자", "용접완료시간"]
     st.subheader(t("용접현황"))
     table_rows = shown_summary[["_doc_id", *summary_columns]].copy().reset_index(drop=True)
-    table_rows["삭제 선택"] = False
+    if can_manage_team():
+        table_rows["삭제 선택"] = False
 
     def status_row_style(row):
         if row["상태"] == ACTIVE:
@@ -1536,6 +1645,16 @@ def list_page():
 
     if table_rows.empty:
         edited_table = table_rows.copy()
+    elif not can_manage_team():
+        st.dataframe(
+            table_rows[summary_columns].style.format({"상태": t}).apply(
+                status_row_style, axis=1, subset=["상태"]
+            ),
+            hide_index=True,
+            width="stretch",
+            height=min(750, 65 + 35 * min(len(table_rows), 20)),
+        )
+        edited_table = table_rows
     else:
         # Recompute after filters/reruns: fit the visible rows, up to about 20.
         editor_height = min(750, 65 + 35 * min(len(table_rows), 20))
@@ -1573,7 +1692,7 @@ def list_page():
         st.error(t(msg))
 
     states_by_id = {row["_doc_id"]: row for row in joint_states}
-    if st.button(t("SPOOL / JOINT 수정 저장"), type="primary", key="save_joint_table_edits"):
+    if can_manage_team() and st.button(t("SPOOL / JOINT 수정 저장"), type="primary", key="save_joint_table_edits"):
         saved = 0
         errors = []
         for _, edited in edited_table.iterrows():
@@ -1608,14 +1727,15 @@ def list_page():
         )
         for row in joint_states
     }
-    selected_delete_ids = edited_table.loc[edited_table["삭제 선택"], "_doc_id"].tolist()
-    if st.button(t("🗑️ 선택한 JOINT와 전체 이력 삭제"), disabled=not selected_delete_ids, type="secondary"):
-        st.session_state.delete_joint_pending = list(selected_delete_ids)
-        st.rerun()
-    if msg := st.session_state.pop("delete_joint_msg", None):
-        st.success(t(msg))
-    if pending := st.session_state.get("delete_joint_pending"):
-        confirm_joint_delete(pending, labels)
+    if can_manage_team():
+        selected_delete_ids = edited_table.loc[edited_table["삭제 선택"], "_doc_id"].tolist()
+        if st.button(t("🗑️ 선택한 JOINT와 전체 이력 삭제"), disabled=not selected_delete_ids, type="secondary"):
+            st.session_state.delete_joint_pending = list(selected_delete_ids)
+            st.rerun()
+        if msg := st.session_state.pop("delete_joint_msg", None):
+            st.success(t(msg))
+        if pending := st.session_state.get("delete_joint_pending"):
+            confirm_joint_delete(pending, labels)
 
     with st.expander(t("작업 이력 상세 · 진행률 입력 기록")):
         history_view = history_shown[["상태", "직반", "작업자", "프로젝트번호", "SPOOL_NO", "JOINT_NO", "누계 진행률(%)", "당일 진행률(%)",
@@ -1641,37 +1761,38 @@ def list_page():
     all_export["상태"] = all_export["상태"].map(t)
     all_export = all_export.rename(columns={column: t(column) for column in all_export.columns})
 
-    stamp = now().strftime("%Y%m%d_%H%M")
-    st.subheader(t("다운로드"))
-    all_filename = f"welding_status_{stamp}.xlsx"
-    all_data = to_excel(all_export)
+    if can_manage_team():
+        stamp = now().strftime("%Y%m%d_%H%M")
+        st.subheader(t("다운로드"))
+        all_filename = f"welding_status_{stamp}.xlsx"
+        all_data = to_excel(all_export)
 
-    st.download_button(
-        f"📥 {t('전체 데이터 Excel')}",
-        all_data,
-        file_name=all_filename,
-        mime=XLSX_MIME,
-        width="stretch",
-    )
+        st.download_button(
+            f"📥 {t('전체 데이터 Excel')}",
+            all_data,
+            file_name=all_filename,
+            mime=XLSX_MIME,
+            width="stretch",
+        )
 
-    st.subheader(t("이메일로 보내기"))
-    email_recipient = st.text_input(
-        t("받는 이메일 주소"),
-        key="email_recipient",
-        placeholder="name@example.com",
-    ).strip()
-    send_all = st.button(f"📧 {t('전체 Excel 보내기')}", width="stretch", key="send_all_email")
+        st.subheader(t("이메일로 보내기"))
+        email_recipient = st.text_input(
+            t("받는 이메일 주소"),
+            key="email_recipient",
+            placeholder="name@example.com",
+        ).strip()
+        send_all = st.button(f"📧 {t('전체 Excel 보내기')}", width="stretch", key="send_all_email")
 
-    if send_all:
-        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email_recipient):
-            st.error(t("올바른 이메일 주소를 입력하세요."))
-        else:
-            try:
-                send_excel_email(email_recipient, all_filename, all_data)
-            except ValueError as exc:
-                st.error(t(str(exc)))
+        if send_all:
+            if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email_recipient):
+                st.error(t("올바른 이메일 주소를 입력하세요."))
             else:
-                st.success(t(f"{email_recipient} 주소로 Excel 파일을 보냈습니다."))
+                try:
+                    send_excel_email(email_recipient, all_filename, all_data)
+                except ValueError as exc:
+                    st.error(t(str(exc)))
+                else:
+                    st.success(t(f"{email_recipient} 주소로 Excel 파일을 보냈습니다."))
 
 
 def account_page():
@@ -1683,13 +1804,23 @@ def account_page():
     st.subheader(t("계정 추가"))
     with st.form("add_worker_account_form", clear_on_submit=True):
         new_name = st.text_input(t("이름 / 로그인 ID"))
-        new_team = st.selectbox(t("직반"), list(BASE_WORKERS), format_func=t)
-        new_password = st.text_input(t("비밀번호 (비워두면 직반 번호)"), type="password")
+        new_teams = st.multiselect(
+            t("권한 직반"), list(BASE_WORKERS), format_func=t, key="new_account_teams"
+        )
+        new_role = st.selectbox(
+            t("계정 유형 선택"), ["worker", "team_admin", "guest"],
+            format_func=lambda role: t({"worker": "용접사", "team_admin": "반장님", "guest": "게스트"}[role]),
+            key="new_account_role",
+        )
+        new_password = st.text_input(t("비밀번호 (비워두면 첫 직반 번호)"), type="password")
         add_account = st.form_submit_button(t("계정 저장"), type="primary", width="stretch")
+    st.caption(t("여러 직반 선택 가능"))
+    if new_role == "guest":
+        st.caption(t("게스트 계정은 데이터 조회만 가능합니다."))
     if add_account:
-        initial_password = new_password or "".join(char for char in new_team if char.isdigit())
+        initial_password = new_password or ("".join(char for char in new_teams[0] if char.isdigit()) if new_teams else "")
         try:
-            create_managed_account(new_name, new_team, initial_password)
+            create_managed_account(new_name, new_teams, new_role, initial_password)
         except ValueError as exc:
             st.error(t(str(exc)))
         else:
@@ -1710,16 +1841,18 @@ def account_page():
     legacy_ids = {*WORKER_ACCOUNTS, *SPECIAL_ACCOUNTS}
     rows.extend(
         {
-            "ID": login_id, "이름": login_id, "직반": t(account["team"]),
-            "계정 유형": t("작업자"),
+            "ID": login_id, "이름": login_id,
+            "직반": ", ".join(t(team) for team in account_teams(overrides.get(login_id, account))),
+            "계정 유형": t({"worker": "용접사", "team_admin": "반장님", "guest": "게스트"}.get(overrides.get(login_id, {}).get("role", "worker"), "용접사")),
             "상태": t("활성") if overrides.get(login_id, {}).get("active", True) else t("비활성"),
         }
         for login_id, account in WORKER_ACCOUNTS.items()
     )
     rows.extend(
         {
-            "ID": login_id, "이름": login_id, "직반": t(account["team"]),
-            "계정 유형": t("팀 관리자"),
+            "ID": login_id, "이름": login_id,
+            "직반": ", ".join(t(team) for team in account_teams(overrides.get(login_id, account))),
+            "계정 유형": t({"worker": "용접사", "team_admin": "반장님", "guest": "게스트"}.get(overrides.get(login_id, {}).get("role", "team_admin"), "반장님")),
             "상태": t("활성") if overrides.get(login_id, {}).get("active", True) else t("비활성"),
         }
         for login_id, account in SPECIAL_ACCOUNTS.items()
@@ -1727,7 +1860,8 @@ def account_page():
     rows.extend(
         {
             "ID": account["login_id"], "이름": account.get("name", account["login_id"]),
-            "직반": t(account.get("team", "")), "계정 유형": t("작업자"),
+            "직반": ", ".join(t(team) for team in account_teams(account)),
+            "계정 유형": t({"worker": "용접사", "team_admin": "반장님", "guest": "게스트"}.get(account.get("role", "worker"), "용접사")),
             "상태": t("활성") if account.get("active", True) else t("비활성"),
         }
         for account in accounts
@@ -1752,7 +1886,35 @@ def account_page():
         })
     selected_id = st.selectbox(t("계정 선택"), list(by_id), key="manage_account_select")
     selected = by_id[selected_id]
-    st.caption(f"{t(selected.get('team', ''))} · {t('활성') if selected.get('active', True) else t('비활성')}")
+    selected_teams = account_teams(selected)
+    st.caption(f"{', '.join(t(team) for team in selected_teams)} · {t('활성') if selected.get('active', True) else t('비활성')}")
+
+    role_options = ["worker", "team_admin", "guest"]
+    with st.form("update_account_access_form"):
+        revised_teams = st.multiselect(
+            t("권한 직반"), list(BASE_WORKERS), default=selected_teams,
+            format_func=t, key="revised_account_teams",
+        )
+        current_role = selected.get("role", "worker")
+        if current_role not in role_options:
+            current_role = "worker"
+        revised_role = st.selectbox(
+            t("계정 유형 선택"), role_options, index=role_options.index(current_role),
+            format_func=lambda role: t({"worker": "용접사", "team_admin": "반장님", "guest": "게스트"}[role]),
+            key=f"revised_account_role_{selected_id}",
+        )
+        save_access = st.form_submit_button(t("권한 저장"), type="primary", width="stretch")
+    if save_access:
+        if not revised_teams:
+            st.error(t("직반을 선택하세요."))
+        else:
+            update_managed_account(selected_id, {
+                "team": revised_teams[0], "teams": revised_teams, "role": revised_role,
+            })
+            refresh_worker_roster()
+            st.rerun()
+    if revised_role == "guest":
+        st.caption(t("게스트 계정은 데이터 조회만 가능합니다."))
 
     with st.form("reset_worker_password_form", clear_on_submit=True):
         replacement_password = st.text_input(t("새 비밀번호"), type="password")
@@ -1789,18 +1951,29 @@ if user["role"] != "admin":
     if active_account.exists and not account_data.get("active", True):
         st.session_state.pop("current_user", None)
         st.rerun()
+    if active_account.exists:
+        updated_teams = account_teams(account_data)
+        st.session_state.current_user.update({
+            "role": account_data.get("role", user["role"]),
+            "name": account_data.get("name", user["name"]),
+            "team": updated_teams[0] if updated_teams else user.get("team", ""),
+            "teams": updated_teams,
+        })
+        user = current_user()
 landing_page = "start"
-if user["role"] == "worker" and active_segments(user["team"], user["name"]):
+if is_guest():
+    landing_page = "list"
+elif user["role"] == "worker" and active_segments(user_teams(user), user["name"]):
     landing_page = "finish"
 
 PAGES = {
     "start": st.Page(start_page, title=t("용접시작"), icon="🔥", default=landing_page == "start"),
     "finish": st.Page(finish_page, title=t("용접완료"), icon="✅", url_path="finish", default=landing_page == "finish"),
-    "list": st.Page(list_page, title=t("용접목록"), icon="📋", url_path="list"),
+    "list": st.Page(list_page, title=t("용접목록"), icon="📋", url_path="list", default=landing_page == "list"),
     "accounts": st.Page(account_page, title=t("계정관리"), icon="👥", url_path="accounts"),
 }
-available_pages = [PAGES["start"], PAGES["finish"]]
-if can_manage_team():
+available_pages = [PAGES["list"]] if is_guest() else [PAGES["start"], PAGES["finish"]]
+if can_view_list() and not is_guest():
     available_pages.append(PAGES["list"])
 if is_admin():
     available_pages.append(PAGES["accounts"])
